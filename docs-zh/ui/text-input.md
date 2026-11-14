@@ -27,17 +27,17 @@ ui.TextArea(c, &app.notes).Height(160)
 
   ```go
   ui.TextArea(c, &app.draft).Lines(1, 8).OnPaste(func(text string) bool {
-  	if len(text) > 10_000 {
-  		app.attach(text) // a large block becomes an attachment
-  		return true
-  	}
-  	if text == "" {
-  		if png := mygo.Clipboard.ReadImage(); png != nil {
-  			app.attachImage(png)
-  			return true
-  		}
-  	}
-  	return false
+	if len(text) > 10_000 {
+		app.attach(text) // a large block becomes an attachment
+		return true
+	}
+	if text == "" {
+		if png := mygo.Clipboard.ReadImage(); png != nil {
+			app.attachImage(png)
+			return true
+		}
+	}
+	return false
   })
   ```
 
@@ -45,16 +45,16 @@ ui.TextArea(c, &app.notes).Height(160)
 
   ```go
   ui.TextArea(c, &app.draft).Lines(1, 8).OnTextKey(func(k ui.TextKey) bool {
-  	switch {
-  	case k.Key == ui.KeyEnter && k.Mods == 0:
-  		app.send(k.Text())
-  		k.SetText("")
-  		return true
-  	case k.Key == ui.KeyUp && k.Mods == 0 && k.Text() == "":
-  		k.SetText(app.lastSent())
-  		return true
-  	}
-  	return false // Shift+Enter breaks the line
+	switch {
+	case k.Key == ui.KeyEnter && k.Mods == 0:
+		app.send(k.Text())
+		k.SetText("")
+		return true
+	case k.Key == ui.KeyUp && k.Mods == 0 && k.Text() == "":
+		k.SetText(app.lastSent())
+		return true
+	}
+	return false // Shift+Enter breaks the line
   })
   ```
 

@@ -11,6 +11,23 @@ type seq[T any] struct {
 	left, right *seq[T]
 	items       []T // only leaves hold items
 	n, height   int
+	w           int
+}
+
+type weighted interface{ weight() int }
+
+func itemsWeight[T any](items []T) int {
+	if len(items) == 0 {
+		return 0
+	}
+	if _, ok := any(&items[0]).(weighted); !ok {
+		return 0
+	}
+	w := 0
+	for i := range items {
+		w += any(&items[i]).(weighted).weight()
+	}
+	return w
 }
 
 const seqChunk = 32
@@ -33,7 +50,7 @@ func seqLeaf[T any](items []T) *seq[T] {
 	if len(items) == 0 {
 		return nil
 	}
-	return &seq[T]{items: items, n: len(items), height: 1}
+	return &seq[T]{items: items, n: len(items), height: 1, w: itemsWeight(items)}
 }
 
 func seqBranch[T any](a, b *seq[T]) *seq[T] {
@@ -43,7 +60,7 @@ func seqBranch[T any](a, b *seq[T]) *seq[T] {
 	if b == nil {
 		return a
 	}
-	return &seq[T]{left: a, right: b, n: a.n + b.n, height: 1 + max(a.height, b.height)}
+	return &seq[T]{left: a, right: b, n: a.n + b.n, height: 1 + max(a.height, b.height), w: a.w + b.w}
 }
 
 func seqBalance[T any](s *seq[T]) *seq[T] {
@@ -145,12 +162,14 @@ func seqSet[T any](s *seq[T], i int, v T) *seq[T] {
 		items := make([]T, len(s.items))
 		copy(items, s.items)
 		items[i] = v
-		return &seq[T]{items: items, n: s.n, height: 1}
+		return &seq[T]{items: items, n: s.n, height: 1, w: itemsWeight(items)}
 	}
 	if i < s.left.n {
-		return &seq[T]{left: seqSet(s.left, i, v), right: s.right, n: s.n, height: s.height}
+		l := seqSet(s.left, i, v)
+		return &seq[T]{left: l, right: s.right, n: s.n, height: s.height, w: l.w + s.right.w}
 	}
-	return &seq[T]{left: s.left, right: seqSet(s.right, i-s.left.n, v), n: s.n, height: s.height}
+	r := seqSet(s.right, i-s.left.n, v)
+	return &seq[T]{left: s.left, right: r, n: s.n, height: s.height, w: s.left.w + r.w}
 }
 
 // seqEach calls fn with the items from index from on, and their indices,
@@ -175,4 +194,44 @@ func seqWalk[T any](s *seq[T], from, base int, fn func(i int, v *T) bool) bool {
 		return false
 	}
 	return seqWalk(s.right, from-s.left.n, base+s.left.n, fn)
+}
+
+func seqWeightBefore[T any](s *seq[T], i int) int {
+	w := 0
+	for s != nil && i > 0 {
+		if s.left == nil {
+			return w + itemsWeight(s.items[:min(i, len(s.items))])
+		}
+		if i < s.left.n {
+			s = s.left
+		} else {
+			w += s.left.w
+			i -= s.left.n
+			s = s.right
+		}
+	}
+	return w
+}
+
+func seqSearch[T any](s *seq[T], x int) int {
+	i, acc := 0, 0
+	for s != nil {
+		if s.left == nil {
+			for k := range s.items {
+				acc += any(&s.items[k]).(weighted).weight()
+				if acc >= x {
+					return i + k
+				}
+			}
+			return i + len(s.items)
+		}
+		if acc+s.left.w >= x {
+			s = s.left
+		} else {
+			acc += s.left.w
+			i += s.left.n
+			s = s.right
+		}
+	}
+	return i
 }

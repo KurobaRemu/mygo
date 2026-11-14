@@ -27,8 +27,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   field.Radius(12).Background(t.Surface).
-  	Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.3)).
-  	InsetShadow(0, 0, 1, 0, ui.RGBA(255, 255, 255, 0.2))
+	Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.3)).
+	InsetShadow(0, 0, 1, 0, ui.RGBA(255, 255, 255, 0.2))
   ```
 
   `NoShadow()` takes off the shadows added so far, as `box-shadow: none`,
@@ -51,8 +51,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   ui.Box(c).Size(240, 140).Radius(16).RadialGradient(ui.RadialGradient{
-  	Center: ui.Point{X: 0.3, Y: 0.2}, Oklab: true,
-  	Stops:  []ui.GradientStop{{ui.Hex("#a5b4fc"), 0}, {ui.Hex("#312e81"), 1}},
+	Center: ui.Point{X: 0.3, Y: 0.2}, Oklab: true,
+	Stops:  []ui.GradientStop{{ui.Hex("#a5b4fc"), 0}, {ui.Hex("#312e81"), 1}},
   })
   ```
 
@@ -62,7 +62,7 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
   ```go
   rainbow := []ui.GradientStop{{red, 0}, {yellow, 0.33}, {blue, 0.66}, {red, 1}}
   ui.Box(c).Size(120, 80).Radius(16).Border(4, ui.Color{}).
-  	BorderConicGradient(ui.ConicGradient{Stops: rainbow, Oklab: true})
+	BorderConicGradient(ui.ConicGradient{Stops: rainbow, Oklab: true})
   ```
 
   `Stripes(c, width, gap, angle)` draws stripes over the background, as on
@@ -92,8 +92,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   for _, l := range []struct{ width, blur float32 }{{6, 0}, {9, 4}, {15, 15}} {
-  	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().
-  		Radius(16).Border(l.width, ui.Color{}).BorderConicGradient(glow).Blur(l.blur)
+	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().
+		Radius(16).Border(l.width, ui.Color{}).BorderConicGradient(glow).Blur(l.blur)
   }
   ```
 - **Clipping to an inset.** `ClipInset(top, right, bottom, left, radius)`
@@ -109,7 +109,7 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
   ```go
   hidden := float32(100)
   if app.open {
-  	hidden = 0
+	hidden = 0
   }
   card.ClipInsetPercent(0, card.AnimateTo("wipe", hidden, ui.Smooth), 0, 0, 12)
   ```
@@ -150,8 +150,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
   black := ui.RGB(0, 0, 0)
   solid := ui.LinearGradient{From: black, To: black}
   ui.Box(c).Size(120, 40).Radius(20).Padding(1.5).Gradient(pink, violet, 90).Masks(
-  	ui.Mask{Image: solid, Box: ui.MaskContentBox, Composite: ui.MaskExclude},
-  	ui.Mask{Image: solid},
+	ui.Mask{Image: solid, Box: ui.MaskContentBox, Composite: ui.MaskExclude},
+	ui.Mask{Image: solid},
   )
   ```
 
@@ -159,8 +159,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   disc := func(x, y float32) ui.RadialGradient {
-  	return ui.RadialGradient{Center: ui.Point{X: x, Y: y}, Radius: 40,
-  		Stops: []ui.GradientStop{{black, 0.98}, {ui.Transparent, 1}}}
+	return ui.RadialGradient{Center: ui.Point{X: x, Y: y}, Radius: 40,
+		Stops: []ui.GradientStop{{black, 0.98}, {ui.Transparent, 1}}}
   }
   moon := ui.Box(c).Size(80, 80).Background(t.Text)
   moon.Masks(ui.Mask{Image: disc(0.5, 0.5), Composite: ui.MaskSubtract}, ui.Mask{Image: disc(0.7, 0.35)})
@@ -185,7 +185,7 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   ui.Box(c).Size(900, 212).Radius(16).Gradient(from, to, 30).
-  	Shadow(0, 10, 40, 0, shade).Cache().Children(func() { /* … */ })
+	Shadow(0, 10, 40, 0, shade).Cache().Children(func() { /* … */ })
   ```
 - **Materials.** `Material(m)` fills the box with a material a package
   paints, in place of a background, as the [glass
@@ -393,11 +393,11 @@ theme follows and a frame follows the changes of:
   p := c.Preferences()
   size := float32(28)
   if p.Pointer == ui.PointerCoarse {
-  	size = 44
+	size = 44
   }
   del := ui.Button(c, "×").Size(size, size).Label("Delete")
   if p.Hover() {
-  	del.Tooltip("Delete")
+	del.Tooltip("Delete")
   }
   ```
 

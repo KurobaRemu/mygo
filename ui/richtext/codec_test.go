@@ -107,7 +107,7 @@ func TestCopyPaste(t *testing.T) {
 			t.Fatalf("no %s copied", f)
 		}
 	}
-	if text, _ := d.Read(transfer.Text); string(text) != "Land at 10:40" {
+	if text, _ := d.Read(transfer.Text); string(text) != "Land at **10:40**" {
 		t.Fatalf("plain text %q", text)
 	}
 	doc.SetSelection(0, 0)
@@ -199,8 +199,8 @@ func TestMarkdownEscapes(t *testing.T) {
 		{TextOf(para(ParagraphStyle{}, Run{Text: "a``b", Attributes: Attributes{Code: true}})), "```a``b```"},
 		{TextOf(para(ParagraphStyle{}, Run{Text: "`x", Attributes: Attributes{Code: true}})), "`` `x ``"},
 		// Delimiters that cannot open or close where they are.
-		{TextOf(para(ParagraphStyle{}, Run{Text: "foo.", Attributes: Attributes{Weight: 700}}, Run{Text: "bar"})), "<strong>foo.</strong>bar"},
-		{TextOf(para(ParagraphStyle{}, Run{Text: "x"}, Run{Text: "(y)", Attributes: Attributes{Italic: true}})), "x<em>(y)</em>"},
+		{TextOf(para(ParagraphStyle{}, Run{Text: "foo.", Attributes: Attributes{Weight: 700}}, Run{Text: "bar"})), "**foo.**bar"},
+		{TextOf(para(ParagraphStyle{}, Run{Text: "x"}, Run{Text: "(y)", Attributes: Attributes{Italic: true}})), "x*(y)*"},
 		{TextOf(para(ParagraphStyle{}, Run{Text: "foo.", Attributes: Attributes{Weight: 700}}, Run{Text: " bar"})), "**foo.** bar"},
 	} {
 		if got := c.text.Markdown(); got != c.want {

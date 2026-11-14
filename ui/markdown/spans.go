@@ -316,7 +316,8 @@ func (sb *spanBuilder) inlines(from, to int, s spanStyle) {
 			cs.code = true
 			// The code's text is its source's bytes but for the spaces
 			// stripped at its ends and line endings as spaces.
-			a, z := codeStart(sb.d.Source(), n), n.End-(codeStart(sb.d.Source(), n)-n.Start)
+			fence := parser.CodeFence(sb.d.Source(), n)
+			a, z := n.Start+fence, n.End-fence
 			if z-a == len(n.Text)+2 && sb.d.Source()[a] == ' ' {
 				a++
 			}
@@ -474,11 +475,7 @@ func (sb *spanBuilder) mathObject(n *parser.Inline, s spanStyle, link int) bool 
 
 // codeStart returns where a code span's text starts in the source.
 func codeStart(src string, n *parser.Inline) int {
-	i := n.Start
-	for i < n.End && src[i] == '`' {
-		i++
-	}
-	return i
+	return n.Start + parser.CodeFence(src, n)
 }
 
 func mathStart(src string, n *parser.Inline) int {

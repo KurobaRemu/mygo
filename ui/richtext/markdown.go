@@ -1,7 +1,6 @@
 package richtext
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"unicode"
@@ -183,6 +182,7 @@ func (m mark) close(html bool) string {
 // start a block at the start of the paragraph is escaped, as the text
 // of an item or a heading too.
 func writeMarkdownRuns(b *strings.Builder, runs []Run) {
+	runs = sourceRuns(runs)
 	s, delims := renderRuns(runs, nil)
 	if len(delims) > 0 && !readsAs(s, runs) {
 		html := map[delimKey]bool{}
@@ -224,6 +224,24 @@ type delim struct {
 // are, as CommonMark's rules of flanking say, the runs of the same
 // character around them taken together.
 func (d delim) flanks(s string) bool {
+	if d.key.kind == 'b' || d.key.kind == 'i' {
+		before, after := ' ', ' '
+		if d.open > 0 {
+			before, _ = utf8.DecodeLastRuneInString(s[:d.open])
+		}
+		if d.open+d.length < len(s) {
+			after, _ = utf8.DecodeRuneInString(s[d.open+d.length:])
+		}
+		open := !unicode.IsSpace(after)
+		if d.close > 0 {
+			before, _ = utf8.DecodeLastRuneInString(s[:d.close])
+		}
+		if d.close+d.length < len(s) {
+			after, _ = utf8.DecodeRuneInString(s[d.close+d.length:])
+		}
+		close := !unicode.IsSpace(before)
+		return open && close
+	}
 	return canFlank(s, d.open, d.length, d.char, true) && canFlank(s, d.close, d.length, d.char, false)
 }
 
@@ -330,6 +348,16 @@ func renderRuns(runs []Run, html map[delimKey]bool) (string, []delim) {
 	return b.String(), delims
 }
 
+// sourceRuns returns runs with the line breaks within their paragraphs as
+// newlines, which is how Markdown writes them.
+func sourceRuns(runs []Run) []Run {
+	out := append([]Run(nil), runs...)
+	for i := range out {
+		out[i].Text = lineBreaksAsNewlines(out[i].Text)
+	}
+	return out
+}
+
 // readsAs reports whether s reads back as runs, as far as Markdown keeps
 // them: their text, and the marks of all but whitespace.
 func readsAs(s string, runs []Run) bool {
@@ -338,46 +366,91 @@ func readsAs(s string, runs []Run) bool {
 		if got != nil {
 			return false
 		}
-		got = append(p.Runs, Run{})[:len(p.Runs)]
+		got = append([]Run{}, sourceRuns(p.Runs)...)
 	}
-	return markKey(got) == markKey(runs)
+	return sameMarkRuns(got, sourceRuns(runs))
 }
 
-// markKey returns the text of runs with the marks of each character
-// Markdown keeps, but none of whitespace outside code, nor of spaces
-// ending the paragraph, which it does not show.
-func markKey(runs []Run) string {
-	var b strings.Builder
-	type marks struct {
-		bold, italic, strike, under, code bool
-		link                              string
-		at                                Attachment
-	}
-	var all []rune
-	var ms []marks
+type runeMarks struct {
+	bold, italic, strike, under, code bool
+	link, name, url                   string
+}
+
+type markScanner struct {
+	runs []Run
+	ri   int
+	bi   int
+	rem  int
+	curM runeMarks
+	code bool
+}
+
+func newMarkScanner(runs []Run) markScanner {
+	rem := 0
 	for _, r := range runs {
-		a := r.Attributes
-		m := marks{a.Bold(), a.Italic, a.Strikethrough, a.Underline, a.Code, a.Link, Attachment{}}
-		if a.Attachment != nil {
-			m.at = Attachment{Name: a.Attachment.Name, URL: a.Attachment.URL}
+		rem += len(r.Text)
+	}
+	for i := len(runs) - 1; i >= 0 && !runs[i].Attributes.Code; i-- {
+		s := runs[i].Text
+		j := len(s)
+		for j > 0 && s[j-1] == ' ' {
+			j--
+			rem--
 		}
-		for _, c := range r.Text {
-			all = append(all, c)
-			ms = append(ms, m)
+		if j > 0 {
+			break
 		}
 	}
-	end := len(all)
-	for end > 0 && all[end-1] == ' ' && !ms[end-1].code {
-		end--
-	}
-	for i, c := range all[:end] {
-		m := ms[i]
-		if unicode.IsSpace(c) && !m.code {
-			m = marks{}
+	return markScanner{runs: runs, rem: rem}
+}
+
+func (s *markScanner) next() (rune, runeMarks, bool) {
+	for s.rem > 0 && s.ri < len(s.runs) {
+		r := &s.runs[s.ri]
+		if s.bi >= len(r.Text) {
+			s.ri++
+			s.bi = 0
+			continue
 		}
-		fmt.Fprintf(&b, "%c%v\x00", c, m)
+		if s.bi == 0 {
+			a := r.Attributes
+			s.code = a.Code
+			s.curM = runeMarks{bold: a.Bold(), italic: a.Italic, strike: a.Strikethrough, under: a.Underline, code: a.Code, link: a.Link}
+			if a.Attachment != nil {
+				s.curM.name, s.curM.url = a.Attachment.Name, a.Attachment.URL
+			}
+		}
+		ch, w := utf8.DecodeRuneInString(r.Text[s.bi:])
+		s.bi += w
+		s.rem -= w
+		m := s.curM
+		if unicode.IsSpace(ch) && !s.code {
+			m = runeMarks{}
+		}
+		return ch, m, true
 	}
-	return b.String()
+	return 0, runeMarks{}, false
+}
+
+func sameMarkRuns(a, b []Run) bool {
+	sa := newMarkScanner(a)
+	sb := newMarkScanner(b)
+	if sa.rem != sb.rem {
+		return false
+	}
+	for {
+		ca, ma, oka := sa.next()
+		cb, mb, okb := sb.next()
+		if oka != okb {
+			return false
+		}
+		if !oka {
+			return true
+		}
+		if ca != cb || ma != mb {
+			return false
+		}
+	}
 }
 
 // codeSpan returns s as a code span, fenced by more backticks than any

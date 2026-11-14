@@ -71,6 +71,14 @@ type Edit struct {
 	Text       string
 }
 
+type TextChange struct {
+	Start, End int
+	NewEnd     int
+	Text       string
+	Typing     bool
+	Version    uint64
+}
+
 // Pos is a place in a text: a line, from 0, and a column in bytes from
 // the start of the line.
 type Pos struct{ Line, Col int }
@@ -86,6 +94,7 @@ type change struct {
 	oldStart, oldEnd, newStart, newEnd int
 	oldLine, oldEndLine                int
 	newLine, newEndLine                int
+	typing                             bool
 }
 
 type logEntry struct {
@@ -410,7 +419,7 @@ func (b *Buffer) applyStep(edits [][]Edit, ends [][]string) ([][]Edit, [][]strin
 		if i < len(ends) {
 			codes = ends[i]
 		}
-		text, newEnds, changes, kept := b.replace(edits[i], codes)
+		text, newEnds, changes, kept := b.replace(edits[i], codes, editOther)
 		if changes == nil {
 			continue
 		}
@@ -459,7 +468,7 @@ func inverse(before rope.Text, ends lineEnds, changes []change, kept []byte) ([]
 func (b *Buffer) EditRemote(edits ...Edit) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	text, ends, changes, _ := b.replace(edits, nil)
+	text, ends, changes, _ := b.replace(edits, nil, editOther)
 	if changes == nil {
 		return
 	}
@@ -492,7 +501,7 @@ func (b *Buffer) edit(edits []Edit, kind editKind, owner, selBefore any) []chang
 // replace takes them, nil for those lineEnds.made gives.
 func (b *Buffer) editEnds(edits []Edit, codes []string, kind editKind, owner, selBefore any) []change {
 	before, beforeEnds := b.text, b.ends
-	text, ends, changes, kept := b.replace(edits, codes)
+	text, ends, changes, kept := b.replace(edits, codes, kind)
 	if changes == nil {
 		return nil
 	}
@@ -534,7 +543,7 @@ func (b *Buffer) editEnds(edits []Edit, codes []string, kind editKind, owner, se
 // kept, nil when none, is for each change the code the break after it had
 // when the edits changed it (fixCR, or codes' one more), else 0: what
 // inverse puts back.
-func (b *Buffer) replace(edits []Edit, codes []string) (_ rope.Text, _ lineEnds, _ []change, kept []byte) {
+func (b *Buffer) replace(edits []Edit, codes []string, kind editKind) (_ rope.Text, _ lineEnds, _ []change, kept []byte) {
 	if len(edits) == 0 {
 		return b.text, b.ends, nil, nil
 	}
@@ -567,7 +576,7 @@ func (b *Buffer) replace(edits []Edit, codes []string) (_ rope.Text, _ lineEnds,
 		if start == end && e.Text == "" || end-start == len(e.Text) && before.Slice(start, end) == e.Text {
 			continue
 		}
-		c := change{oldStart: start, oldEnd: end}
+		c := change{oldStart: start, oldEnd: end, typing: kind == editTyping}
 		c.oldLine = before.LineOf(start)
 		c.oldEndLine = c.oldLine
 		if end > start {
@@ -676,6 +685,23 @@ func (b *Buffer) changesSince(since uint64) ([][]change, uint64, bool) {
 		out[i] = e.changes
 	}
 	return out, version, ok
+}
+
+func (b *Buffer) ChangesSince(since uint64) ([]TextChange, uint64, bool) {
+	entries, version, ok := b.entriesSince(since)
+	if !ok {
+		return nil, version, false
+	}
+	var out []TextChange
+	for _, e := range entries {
+		for _, c := range e.changes {
+			out = append(out, TextChange{
+				Start: c.oldStart, End: c.oldEnd, NewEnd: c.newEnd,
+				Text: e.text.Slice(c.newStart, c.newEnd), Typing: c.typing, Version: e.version,
+			})
+		}
+	}
+	return out, version, true
 }
 
 // entriesSince returns the log's entries after version since.

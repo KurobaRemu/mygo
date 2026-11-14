@@ -37,3 +37,28 @@ func StandsAlone(r rune) bool {
 func WordBoundary(a, b rune) bool {
 	return IsWordRune(a) != IsWordRune(b) || StandsAlone(a) || StandsAlone(b)
 }
+
+// FormatWordBoundary reports whether a and b, next to each other, belong
+// to different words for inline formatting, which wraps the run of word
+// runes of one script at the caret: Typora wraps `你好` as one word and
+// splits `alpha好` at the script change (record 2026-11-09, seed3/c14;
+// 2026-11-10, seed4/c19). Movement keeps the finer WordBoundary.
+func FormatWordBoundary(a, b rune) bool {
+	if IsWordRune(a) != IsWordRune(b) {
+		return true
+	}
+	if !IsWordRune(a) {
+		return false
+	}
+	return cjk(a) != cjk(b)
+}
+
+// cjk reports whether r belongs to a script written without spaces, whose
+// words the formatter wraps as runs.
+func cjk(r rune) bool {
+	switch r {
+	case 0x30fc, 0xff70: // ー and its halfwidth form, of the Common script
+		return true
+	}
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r)
+}

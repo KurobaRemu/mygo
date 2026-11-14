@@ -298,13 +298,12 @@ func (ed *editor) autoPair(t string) bool {
 	// comment for quotes.
 	for _, s := range ed.sels {
 		next, _ := r.RuneAt(s.head)
-		if s.head < r.Len() && next != '\n' && !unicode.IsSpace(next) && !strings.ContainsRune(")]}>,;:", next) {
+		if s.head < r.Len() && next != '\n' && !unicode.IsSpace(next) && !strings.ContainsRune(")]}>,;:", next) && !isCJKPunctuation(next) {
 			return false
 		}
 		if pair.Open == pair.Close {
-			// A quote after a word character starts nothing.
 			prev, _ := r.RuneBefore(s.head)
-			if isWordRune(prev) {
+			if isWordRune(prev) && !isCJKQuoteRune(prev) {
 				return false
 			}
 		}
@@ -323,6 +322,22 @@ func (ed *editor) autoPair(t string) bool {
 	}
 	ed.afterTyping(t)
 	return true
+}
+
+func isCJKQuoteRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) || isCJKPunctuation(r)
+}
+
+func isCJKPunctuation(r rune) bool {
+	if !unicode.IsPunct(r) {
+		return false
+	}
+	return r >= 0x2000 && r <= 0x206f ||
+		r >= 0x2e00 && r <= 0x2e7f ||
+		r >= 0x3000 && r <= 0x303f ||
+		r >= 0xfe10 && r <= 0xfe1f ||
+		r >= 0xfe30 && r <= 0xfe6f ||
+		r >= 0xff00 && r <= 0xffef
 }
 
 // tokenAt returns the kind of the token holding the byte before off, or

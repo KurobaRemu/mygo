@@ -97,7 +97,7 @@ if cell.Hovered() {
 
   ```go
   ui.Column(c).Hidden(!app.showDetails).Children(func() {
-  	ui.TextArea(c, &app.notes)
+	ui.TextArea(c, &app.notes)
   })
   ```
 - `Debug` 勾勒元素及其内部的所有内容，包括它们的内边距和外边距，以看清布局为何如此。[检查器](inspector.md)会显示每个元素的盒子，并说明原因。

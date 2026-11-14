@@ -93,20 +93,20 @@ menus, are built from what those are made of:
 
   ```go
   tip := ui.Column(c).AttachTo(b, ui.AnchorBottom, ui.AnchorTop).Margin(6, 0, 0, 0).
-  	AttachedOrigin().Transition(ui.ElementTransition{
-  		Duration: 150 * time.Millisecond, ExitDuration: 100 * time.Millisecond,
-  		Enter: &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
-  		Exit:  &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
-  	})
+	AttachedOrigin().Transition(ui.ElementTransition{
+		Duration: 150 * time.Millisecond, ExitDuration: 100 * time.Millisecond,
+		Enter: &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
+		Exit:  &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
+	})
   _, self := tip.AttachedAnchors()
   tip.AlignItems(ui.Center).Children(func() {
-  	if self == ui.AnchorTop { // below the button, as asked
-  		ui.Text(c, "▲")
-  	}
-  	ui.Text(c, "Copied")
-  	if self == ui.AnchorBottom { // above it, without room below
-  		ui.Text(c, "▼")
-  	}
+	if self == ui.AnchorTop { // below the button, as asked
+		ui.Text(c, "▲")
+	}
+	ui.Text(c, "Copied")
+	if self == ui.AnchorBottom { // above it, without room below
+		ui.Text(c, "▼")
+	}
   })
   ```
 - `PressedOutside` reports a press outside an element, its target and the

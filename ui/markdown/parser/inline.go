@@ -128,6 +128,21 @@ type delim struct {
 	prev, next        int32
 	canOpen, canClose bool
 	at                int
+	// used records a run that has already closed a pair. A closer's
+	// leftover can open the next pair (`**a*****b**`), and the same two
+	// runs close a nested pair (`***a***`); a used run pairs no other way.
+	used bool
+	// pair tells the pair a used run closed, so its two leftovers, one
+	// star each, are the pair's own opening and closing runs.
+	pair int32
+	// absorbed notes a closer that left a star of content before its
+	// closer, which keeps its leftover from closing an outer pair.
+	absorbed bool
+	// strongOnly marks a closer Typora's strong regex admits but its
+	// emphasis regex rejects: a run of three or more stars after a space.
+	// The run closes strong with its last two stars and takes part in no
+	// emphasis (`***beta1. ***`, record 2026-11-11, newops/c46-6).
+	strongOnly bool
 }
 
 type bracket struct {
@@ -173,8 +188,10 @@ type inlineParser struct {
 	refBytes uint8
 	// leftover are the openers no closer matched, for healing.
 	leftover []delim
-	probe    bool
-	out      []Inline
+	// pairs counts the pairs made, naming each for its used runs.
+	pairs int32
+	probe bool
+	out   []Inline
 }
 
 func (ip *inlineParser) reset() {}
@@ -183,13 +200,24 @@ func (ip *inlineParser) reset() {}
 // the block leaves open, as the document streams.
 func (ip *inlineParser) parse(d *Document, i int, heal bool) ([]Inline, []string) {
 	text, _ := d.contentOf(i)
-	// Paragraphs and headings are trimmed of spaces and tabs.
+	// Paragraphs and headings are trimmed of whitespace around their
+	// text, but Typora keeps the whitespace at their start as text.
 	a, b := 0, len(text)
-	for a < b && (text[a] == ' ' || text[a] == '\t' || text[a] == '\n') {
-		a++
+	if d.ext&ExtTyporaContentSpace == 0 {
+		for a < b && (text[a] == ' ' || text[a] == '\t' || text[a] == '\n') {
+			a++
+		}
 	}
+	trimmed := b
 	for b > a && (text[b-1] == ' ' || text[b-1] == '\t' || text[b-1] == '\n') {
 		b--
+	}
+	if b < trimmed && d.ext&ExtTyporaContentSpace != 0 && strings.Contains(text[b:trimmed], "\n") {
+		// Typora keeps a whitespace-only line that runs past a list
+		// item's indent: the line stays the paragraph's last line, which
+		// the soft break shows with the whitespace past the indent
+		// (record 2026-11-10, seed6/ordered-softbreak-in-item).
+		b = trimmed
 	}
 	s := text[a:b]
 	ip.d, ip.ext = d, d.ext
@@ -221,6 +249,7 @@ func (ip *inlineParser) run(s string) {
 	ip.noMath = -1
 	ip.noDollar, ip.noParen, ip.noBracket, ip.openMath, ip.openDollar = -1, -1, -1, -1, -1
 	ip.leftover = ip.leftover[:0]
+	ip.pairs = 0
 	for ip.pos < len(s) {
 		ip.parseInline()
 	}
@@ -451,8 +480,12 @@ func (ip *inlineParser) parseNewline() {
 	}
 	c := ip.newNode(kind, "", ip.pos-1, ip.pos)
 	ip.appendChild(0, c)
-	for ip.pos < len(ip.s) && (ip.s[ip.pos] == ' ' || ip.s[ip.pos] == '\t') {
-		ip.pos++
+	if ip.ext&ExtTyporaContentSpace == 0 {
+		// Typora 把续行行首超出容器缩进的空白当作内容：跳过它会让投影
+		// 无法区分结构缩进和内容空白（记录 2026-11-11，seed9/c9）。
+		for ip.pos < len(ip.s) && (ip.s[ip.pos] == ' ' || ip.s[ip.pos] == '\t') {
+			ip.pos++
+		}
 	}
 }
 
@@ -465,8 +498,10 @@ func (ip *inlineParser) parseBackslash() {
 			ip.pos++
 			n := ip.newNode(LineBreak, "", ip.pos-2, ip.pos)
 			ip.appendChild(0, n)
-			for ip.pos < len(s) && (s[ip.pos] == ' ' || s[ip.pos] == '\t') {
-				ip.pos++
+			if ip.ext&ExtTyporaContentSpace == 0 {
+				for ip.pos < len(s) && (s[ip.pos] == ' ' || s[ip.pos] == '\t') {
+					ip.pos++
+				}
 			}
 			return
 		case (c == '(' || c == '[') && ip.ext&ExtMath != 0:
@@ -511,35 +546,81 @@ func (ip *inlineParser) parseBackticks() {
 	}
 	n := ip.pos - start
 	after := ip.pos
-	if end := ip.scanCloseBackticks(n); end > 0 {
-		content := s[after : end-n]
+	if cs, m := ip.scanCloseBackticks(n); m > 0 {
+		// Both fences are as wide as the shorter of the two runs, and the rest
+		// of a longer opening run is the span's text, as Typora reads a run of
+		// three backticks followed by a run of one (ExtTyporaCodeSpan).
+		d := n
+		if m < n {
+			d = m
+		}
+		content := s[start+d : cs]
 		if strings.IndexByte(content, '\n') >= 0 {
 			content = strings.ReplaceAll(content, "\n", " ")
 		}
 		if len(content) >= 2 && content[0] == ' ' && content[len(content)-1] == ' ' && strings.Trim(content, " ") != "" {
 			content = content[1 : len(content)-1]
 		}
-		c := ip.newNode(Code, content, start, end)
+		c := ip.newNode(Code, content, start, cs+d)
 		ip.appendChild(0, c)
-		ip.pos = end
+		ip.pos = cs + d
 		return
 	}
 	ip.pos = after
 	ip.addText(start, after)
 }
 
-// scanCloseBackticks returns the offset after a run of n backticks from
-// pos, or 0, remembering the last run of each length so that unmatched
-// openers do not take quadratic time, as cmark does.
-func (ip *inlineParser) scanCloseBackticks(n int) int {
+// CodeFence returns the width of the two runs of backticks that fence the code
+// span n in src. They are equal but for ExtTyporaCodeSpan, where a span's
+// opener is as wide as the shorter run: Typora fences a run of three backticks
+// and a run of one with one backtick on either side, and reads the opening
+// run's other two backticks as the span's text (record 2026-11-12, seed18/c1,
+// /c7).
+func CodeFence(src string, n *Inline) int {
+	open, closing := 0, 0
+	for n.Start+open < n.End && src[n.Start+open] == '`' {
+		open++
+	}
+	for n.End-closing > n.Start && src[n.End-closing-1] == '`' {
+		closing++
+	}
+	if closing < open {
+		return closing
+	}
+	return open
+}
+
+// scanCloseBackticks returns where the run that closes a span of n backticks
+// from pos starts and how long that run is, or a length of 0, remembering the
+// last run of each length so that unmatched openers do not take quadratic
+// time, as cmark does. A run of its own length closes the span, as CommonMark
+// reads it. Typora's dialect (ExtTyporaCodeSpan) closes the span with the next
+// run of any length when no run of its own length follows: a run of three
+// backticks and a later run of one are a one backtick span whose text is the
+// opening run's other two backticks (record 2026-11-12, seed18/c1, /c7).
+func (ip *inlineParser) scanCloseBackticks(n int) (int, int) {
 	if n > maxBackticks {
-		return 0
+		return 0, 0
 	}
 	if ip.scannedBackticks && ip.backticks[n] <= ip.pos {
-		return 0
+		if ip.ext&ExtTyporaCodeSpan == 0 {
+			return 0, 0
+		}
+		// An earlier scan reached this text's end without a run of n
+		// backticks; the dialect still takes the next run it finds.
+		if i := strings.IndexByte(ip.s[ip.pos:], '`'); i >= 0 {
+			at := ip.pos + i
+			end := at
+			for end < len(ip.s) && ip.s[end] == '`' {
+				end++
+			}
+			return at, end - at
+		}
+		return 0, 0
 	}
 	s := ip.s
 	i := ip.pos
+	first, firstLen := -1, 0
 	for {
 		k := strings.IndexByte(s[i:], '`')
 		if k < 0 {
@@ -556,13 +637,19 @@ func (ip *inlineParser) scanCloseBackticks(n int) int {
 		}
 		if m == n {
 			ip.d.steps += j - ip.pos
-			return j
+			return i, m
+		}
+		if first < 0 {
+			first, firstLen = i, m
 		}
 		i = j
 	}
 	ip.d.steps += len(s) - ip.pos
 	ip.scannedBackticks = true
-	return 0
+	if ip.ext&ExtTyporaCodeSpan != 0 {
+		return first, firstLen
+	}
+	return 0, 0
 }
 
 // parseDollar reads math between $$ (or $ with DollarMath) at pos.
@@ -708,7 +795,7 @@ func scanAutolink(s string, i int) (int, string, bool) {
 
 // scanDelims reads a run of delimiter c at pos: its length, and whether
 // it can open and close emphasis.
-func (ip *inlineParser) scanDelims(c byte) (n int, canOpen, canClose bool) {
+func (ip *inlineParser) scanDelims(c byte) (n int, canOpen, canClose, strongOnly bool) {
 	s := ip.s
 	i := ip.pos
 	for i < len(s) && s[i] == c {
@@ -731,7 +818,7 @@ func (ip *inlineParser) scanDelims(c byte) (n int, canOpen, canClose bool) {
 	// space, which strict CommonMark would leave as literal asterisks.
 	// A single tilde keeps the rule: it is more often a range, as
 	// 第1章~“附录”, than strikethrough.
-	if (c == '*' || c == '~' && n > 1) && (isCJK(before) || isCJK(after)) {
+	if ip.ext != 0 && ip.ext&ExtTyporaEmphasis == 0 && (c == '*' || c == '~' && n > 1) && (isCJK(before) || isCJK(after)) {
 		left, right = !afterSpace, !beforeSpace
 	}
 	switch c {
@@ -739,6 +826,17 @@ func (ip *inlineParser) scanDelims(c byte) (n int, canOpen, canClose bool) {
 		canOpen = left && (!right || beforePunct)
 		canClose = right && (!left || afterPunct)
 	case '~':
+		if ip.ext&ExtDoubleTildeOnly != 0 && n == 1 {
+			canOpen, canClose = false, false
+			break
+		}
+		if ip.ext&ExtDoubleTildeOnly != 0 && n == 2 {
+			// Typora's del regex needs only a non-space after the opening
+			// `~~` and before the closing one, not CommonMark's flanking
+			// against punctuation.
+			canOpen, canClose = !afterSpace, !beforeSpace
+			break
+		}
 		canOpen, canClose = left, right
 		// A tilde between letters or digits is not strikethrough, as
 		// 20~25, which language models write for ranges.
@@ -746,7 +844,20 @@ func (ip *inlineParser) scanDelims(c byte) (n int, canOpen, canClose bool) {
 			canOpen, canClose = false, false
 		}
 	default:
-		canOpen, canClose = left, right
+		if c == '*' && ip.ext&ExtTyporaEmphasis != 0 {
+			canOpen, canClose = !afterSpace, !beforeSpace
+			if !canClose && n >= 2 {
+				// Typora 的强闭 run 前是空白也仍能闭合：`***beta1. ***`
+				// 的尾 run 闭在末两颗上（记录 2026-11-11，newops/c46-6），
+				// `alpha**- **rs**` 的前两颗与中间 run 配对、末 run 留字面，
+				// `_> **- **` 的 `- ` 成为强内容（记录 2026-11-13，
+				// seed21/c3、seed21/c10）。Typora 的 em 正则要求闭 run 前
+				// 是非空白，这种 run 只参与 strong。
+				canClose, strongOnly = true, true
+			}
+		} else {
+			canOpen, canClose = left, right
+		}
 	}
 	return
 }
@@ -778,15 +889,24 @@ func isPunct(r rune) bool {
 }
 
 func (ip *inlineParser) handleDelim(c byte) {
-	n, canOpen, canClose := ip.scanDelims(c)
+	n, canOpen, canClose, strongOnly := ip.scanDelims(c)
 	start := ip.pos
+	if c == '*' && ip.ext&ExtTyporaEmptyStrong != 0 && start == 0 && n == 4 && canOpen {
+		// A paragraph's leading `****` followed by text is an empty strong
+		// element: Typora reads the first two stars as its opening run and
+		// the last two as its closing one, which the text after them does
+		// not disturb (`****x**`, record 2026-11-10, probe75/h).
+		ip.appendChild(0, ip.newNode(Strong, "", start, start+n))
+		ip.pos += n
+		return
+	}
 	ip.pos += n
 	node := ip.addLiteral(ip.s[start:ip.pos], start, ip.pos)
 	if c == '~' && n > 2 {
 		return
 	}
 	if canOpen || canClose {
-		ip.dl = append(ip.dl, delim{c: c, n: n, orig: n, node: node, prev: ip.last, next: -1, canOpen: canOpen, canClose: canClose, at: start})
+		ip.dl = append(ip.dl, delim{c: c, n: n, orig: n, node: node, prev: ip.last, next: -1, canOpen: canOpen, canClose: canClose, at: start, strongOnly: strongOnly})
 		k := int32(len(ip.dl) - 1)
 		if ip.last >= 0 {
 			ip.dl[ip.last].next = k
@@ -837,8 +957,43 @@ func (ip *inlineParser) processEmphasis(bottom int, final bool) {
 		for opener >= 0 && ip.dl[opener].at >= openersBottom[cd.orig%3][ci] {
 			ip.d.steps++
 			od := &ip.dl[opener]
-			odd := (cd.canOpen || od.canClose) && cd.orig%3 != 0 && (od.orig+cd.orig)%3 == 0
-			if od.c == cd.c && od.canOpen && !odd {
+			// Typora rejects a match whose run lengths sum to a
+			// multiple of three unless both are, as CommonMark does:
+			// `****x**` stays literal and `*jf**hkrd***` nests
+			// (record 2026-11-09, seed5/c3, seed5/c5). A `**` run that
+			// found no closing `**` still opens a one-star emphasis:
+			// Typora's regex takes the run's first star as the opener
+			// and the second as content, so `**bold*x` keeps the
+			// emphasis (record 2026-11-09, p0/inline/bold/backspace-close).
+			typora := ip.ext&ExtTyporaEmphasis != 0
+			fallbackEm := typora && od.orig == 2 && cd.orig == 1
+			use := 1
+			if cd.n >= 2 && od.n >= 2 {
+				use = 2
+			}
+			odd := false
+			if !fallbackEm && cd.orig%3 != 0 && (od.orig+cd.orig)%3 == 0 {
+				if use == 2 && typora {
+					// Typora's strong reader splits a longer closer run and
+					// pairs the opener with its middle two stars, one star
+					// joining the content and the rest staying literal:
+					// `x**a****b**` reads as strong `a*` (record 2026-11-12,
+					// probe116/ascii-ab). A long opener that precedes a bare
+					// `**` closer still keeps both runs literal, as
+					// CommonMark's rule of three rejects the match
+					// (`alpha bej****x**`, seed5/c3).
+					odd = cd.n < 3
+				} else {
+					odd = cd.canOpen || od.canClose
+				}
+			}
+			if od.c == cd.c && od.canOpen && !odd &&
+				// 空白之后的 `***` 尾 run 只闭 strong，余下的单星
+				// 不再闭外层 em（`***beta1. ***`）。
+				!(use == 1 && cd.strongOnly) &&
+				(!typora || !ip.usedDelimsBlock(od, cd, use)) &&
+				(!typora || !ip.adjacentStrongGroup(opener, closer, use)) &&
+				!(fallbackEm && ip.laterStrongCloser(od, cd)) {
 				found = true
 				break
 			}
@@ -857,6 +1012,29 @@ func (ip *inlineParser) processEmphasis(bottom int, final bool) {
 			closer = ip.insertStrike(opener, closer)
 			continue
 		}
+		od, cd := &ip.dl[opener], &ip.dl[closer]
+		use := 1
+		if cd.n >= 2 && od.n >= 2 {
+			use = 2
+		}
+		if use == 1 && ip.ext&ExtTyporaEmphasis != 0 && cd.n >= 3 {
+			// Typora 的单星闭合取 run 的末颗星，前面的星留在强调内容
+			// 里：`*beta> 试***` 的强调内容是 `beta> 试**`，闭合星
+			// 记在 run 末颗（记录 2026-11-13，seed21/c15；
+			// probe75/o 的 `*a***b*` 同形）。整条 run 交给
+			// insertEmph 会从 run 头收星，把内容读成 `beta> 试`，
+			// 光标停在末颗时也就落到了 pair 之外。先把前面的星
+			// 切成字面节点，pair 只拿走末颗。
+			head, node := cd.n-1, cd.node
+			text, at := ip.nodes[node].text, ip.nodes[node].start
+			if head > 0 && head < len(text) {
+				ip.insertBefore(node, ip.newNode(Text, text[:head], at, at+head))
+				tail := &ip.nodes[node]
+				tail.text, tail.start = text[head:], at+head
+				cd.at += head
+				cd.n = 1
+			}
+		}
 		closer = ip.insertEmph(opener, closer)
 	}
 	// What remains matched nothing.
@@ -867,6 +1045,83 @@ func (ip *inlineParser) processEmphasis(bottom int, final bool) {
 		}
 		ip.removeDelim(ip.last)
 	}
+}
+
+// usedDelimsBlock tells whether a used delimiter keeps the two from
+// pairing. A run that closed a pair leaves at most the pair's own one-star
+// opening and closing runs, which close the pair's outer emphasis
+// (`***a***`), and leftovers of two or more stars that open the next strong
+// (`**a*****b**`). A used run pairs in no other way: `**a***b**` leaves a
+// literal star, not a second pair (record 2026-11-10, probe75/a, /d, /l).
+func (ip *inlineParser) usedDelimsBlock(od, cd *delim, use int) bool {
+	if !od.used && !cd.used {
+		return false
+	}
+	if use == 1 {
+		if od.used {
+			return !(cd.used && od.pair == cd.pair && od.n == 1 && cd.n == 1 &&
+				!od.absorbed && !cd.absorbed)
+		}
+		// A used one-star closer still closes an outer emphasis the
+		// strong inside it left open (`*jf**hkrd***`, seed5/c5).
+		return cd.n != 1
+	}
+	return !(od.used && od.n >= 2)
+}
+
+// laterStrongCloser tells whether a `**` opener and a one-star closer have a
+// later `**` run to close instead. Typora prefers the strong pair:
+// `**bold*x` keeps the fallback emphasis, but `**a*b**` closes one strong
+// across the literal star (record 2026-11-09, p0/inline/bold/backspace-close;
+// record 2026-11-10, probe75/q).
+// adjacentStrongGroup reports a fresh `****` run that would pair across the
+// boundary Typora left after a `****` run closed strong. Typora's live editor
+// keeps each self-pasted `****` group's stars literal instead of pairing the
+// next group's opening and closing runs (record 2026-11-14, seed23/c6).
+func (ip *inlineParser) adjacentStrongGroup(opener, closer int32, use int) bool {
+	if ip.ext&ExtTyporaEmphasis == 0 || use != 2 {
+		return false
+	}
+	od, cd := &ip.dl[opener], &ip.dl[closer]
+	if od.c != '*' || cd.c != '*' || od.used || cd.used ||
+		od.orig != 4 || od.n != 4 || cd.orig != 4 || cd.n != 4 ||
+		cd.prev != opener || od.prev < 0 {
+		return false
+	}
+	boundary := &ip.dl[od.prev]
+	return boundary.c == '*' && boundary.used && boundary.absorbed &&
+		boundary.orig == 4 && boundary.n == 1
+}
+
+func (ip *inlineParser) laterStrongCloser(od, cd *delim) bool {
+	for k := cd.next; k >= 0; k = ip.dl[k].next {
+		ip.d.steps++
+		d := &ip.dl[k]
+		if d.c != od.c || d.n < 2 || !d.canClose {
+			continue
+		}
+		if (d.canOpen || od.canClose) && d.orig%3 != 0 && (od.orig+d.orig)%3 == 0 {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// outerStarOpener tells whether a fresh opener before opener closes with
+// the one star the closer would leave after the strong. Typora gives that
+// star to the outer emphasis rather than making it content, so the strong
+// ends on the closer's first two stars: `*jf**hkrd***` keeps the emphasis
+// around the strong (record 2026-11-09, seed5/c5).
+func (ip *inlineParser) outerStarOpener(opener int32, cd *delim) bool {
+	for k := ip.dl[opener].prev; k >= 0; k = ip.dl[k].prev {
+		ip.d.steps++
+		d := &ip.dl[k]
+		if d.c == cd.c && d.n >= 1 && d.canOpen && !d.used {
+			return true
+		}
+	}
+	return false
 }
 
 func delimClass(c byte, canOpen bool) int {
@@ -891,18 +1146,37 @@ func (ip *inlineParser) insertEmph(opener, closer int32) int32 {
 	if cd.n >= 2 && od.n >= 2 {
 		use = 2
 	}
+	skip := 0
+	if use == 2 && ip.ext&ExtTyporaEmphasis != 0 && cd.n >= 3 &&
+		!(od.n-use == 1 && cd.n-use == 1) &&
+		!(cd.n-use == 1 && ip.outerStarOpener(opener, cd)) {
+		// Typora closes a strong run one star in: the star before the
+		// closer is content, and what follows the closer opens the next
+		// pair, as in `**a***b**` (record 2026-11-10, probe75/a). The two
+		// runs of a nested pair close whole: `***a***` gives its strong
+		// the run's first two stars and its emphasis the last (probe75/d).
+		skip = 1
+	}
 	on, cn := od.node, cd.node
+	if skip > 0 {
+		text, at := ip.nodes[cn].text, ip.nodes[cn].start
+		ip.insertBefore(cn, ip.newNode(Text, text[:skip], at, at+skip))
+	}
 	od.n -= use
-	cd.n -= use
+	cd.n -= use + skip
 	o, c := &ip.nodes[on], &ip.nodes[cn]
 	o.text = o.text[:len(o.text)-use]
 	o.end -= use
-	c.text = c.text[:len(c.text)-use]
-	c.start += use
+	c.text = c.text[skip+use:]
+	c.start += skip + use
 	kind := Emphasis
 	if use == 2 {
 		kind = Strong
 	}
+	pair := ip.pairs
+	ip.pairs++
+	od.used, od.pair = true, pair
+	cd.used, cd.pair, cd.absorbed = true, pair, skip > 0
 	emph := ip.newNode(kind, "", ip.nodes[on].end, ip.nodes[cn].start)
 	for t := ip.nodes[on].next; t >= 0 && t != cn; {
 		ip.d.steps++

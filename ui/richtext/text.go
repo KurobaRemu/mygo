@@ -23,8 +23,9 @@ import (
 // Offsets count runes, newlines included, as Element.TextSelection does.
 // Paragraphs end at newlines; the style of a paragraph and the attributes
 // of its newline belong to it, as in word processors, so that an empty
-// paragraph remembers the attributes typing gets there. Runs are kept as
-// long as they can be: neighbors with the same attributes are one run.
+// paragraph remembers the attributes typing gets there. A line break within
+// a paragraph is a LineSeparator. Runs are kept as long as they can be:
+// neighbors with the same attributes are one run.
 type Text struct {
 	text  *rope.Node
 	paras *seq[richPara]
@@ -116,6 +117,12 @@ func (a *Attachment) size() (w, h float32) {
 
 // ObjectReplacement is the character an Attachment takes in a text.
 const ObjectReplacement = '￼'
+
+// LineSeparator is the rune of a line break within a paragraph: a Markdown
+// soft or hard line break, which one Paragraph holds. Layout breaks lines at
+// it. String, PlainText, Markdown and the clipboard's JSON write it as "\n";
+// HTML writes it as <br>.
+const LineSeparator = '\u2028'
 
 // ListKind is what a paragraph is an item of.
 type ListKind uint8
@@ -343,8 +350,17 @@ func cutRuns(dst, runs []attrRun, from, to int) []attrRun {
 // Len returns the number of runes of the text, newlines included.
 func (t Text) Len() int { return rope.Sum(t.text).Runes }
 
-// String returns the text without its attributes.
-func (t Text) String() string { return rope.TextOf(t.text).String() }
+// String returns the text as plain text, a line break within a paragraph as
+// a newline.
+func (t Text) String() string {
+	return lineBreaksAsNewlines(rope.TextOf(t.text).String())
+}
+
+// lineBreaksAsNewlines returns s with the line breaks within paragraphs as
+// newlines, which is how plain text, Markdown and the clipboard write them.
+func lineBreaksAsNewlines(s string) string {
+	return strings.ReplaceAll(s, string(LineSeparator), "\n")
+}
 
 // ParagraphCount returns the number of paragraphs: one more than the
 // newlines.
@@ -736,4 +752,93 @@ func (t Text) paragraphSpan(start, end int) (int, int) {
 		pz--
 	}
 	return pa, pz
+}
+
+func paragraphOf(p *richPara, line string) Paragraph {
+	par := Paragraph{Style: p.style}
+	off := 0
+	for _, r := range p.runs {
+		if off >= len(line) {
+			break
+		}
+		end := off
+		for k := 0; k < r.n && end < len(line); k++ {
+			_, size := utf8.DecodeRuneInString(line[end:])
+			end += size
+		}
+		par.Runs = append(par.Runs, Run{Text: line[off:end], Attributes: r.a})
+		off = end
+	}
+	return par
+}
+
+func (t Text) paragraph(i int) Paragraph {
+	return paragraphOf(seqAt(t.seq(), i), rope.TextOf(t.text).Line(i))
+}
+
+func (t Text) replaceParagraphs(pa, pz int, with Text) Text {
+	tx := rope.TextOf(t.text)
+	a := tx.LineStart(pa)
+	b := tx.LineEnd(pz - 1)
+	var items []richPara
+	seqEach(with.seq(), 0, func(k int, p *richPara) bool {
+		q := *p
+		if pa+k < pz {
+			q.id = seqAt(t.seq(), pa+k).id
+		}
+		items = append(items, q)
+		return true
+	})
+	body := rope.TextOf(with.text).String()
+	switch {
+	case pa < pz:
+	case pa < t.ParagraphCount():
+		b, body = a, body+"\n"
+	default:
+		a, body = b, "\n"+body
+	}
+	return Text{
+		text:  rope.ReplaceBytes(t.text, a, b, body),
+		paras: seqReplace(t.seq(), pa, pz, items),
+	}
+}
+
+func diffText(oldT, newT Text) (at, removed, inserted int) {
+	if oldT.text == newT.text {
+		return 0, 0, 0
+	}
+	np, mp := oldT.ParagraphCount(), newT.ParagraphCount()
+	minP := min(np, mp)
+	pa := 0
+	for pa < minP && seqAt(oldT.seq(), pa).id == seqAt(newT.seq(), pa).id && seqAt(oldT.seq(), pa).n == seqAt(newT.seq(), pa).n {
+		pa++
+	}
+	if pa == np && pa == mp {
+		for i := 0; i < np; i++ {
+			if !sameParagraph(oldT.paragraph(i), newT.paragraph(i), true) {
+				pa = i
+				break
+			}
+		}
+		if pa == np {
+			return changedText(oldT.String(), newT.String())
+		}
+	}
+	tail := 0
+	for tail < minP-pa && seqAt(oldT.seq(), np-1-tail).id == seqAt(newT.seq(), mp-1-tail).id && seqAt(oldT.seq(), np-1-tail).n == seqAt(newT.seq(), mp-1-tail).n {
+		tail++
+	}
+	for tail > 0 && !sameParagraph(oldT.paragraph(np-tail), newT.paragraph(mp-tail), true) {
+		tail--
+	}
+	oldTX, newTX := rope.TextOf(oldT.text), rope.TextOf(newT.text)
+	oldByteStart := oldTX.LineStart(pa)
+	newByteStart := newTX.LineStart(pa)
+	oldByteEnd := oldTX.LineEnd(np - 1 - tail)
+	newByteEnd := newTX.LineEnd(mp - 1 - tail)
+	baseRunes := oldT.paraStart(pa)
+	oldMid := oldTX.Slice(oldByteStart, oldByteEnd)
+	newMid := newTX.Slice(newByteStart, newByteEnd)
+	relAt, rem, ins := changedText(oldMid, newMid)
+	return baseRunes + relAt, rem, ins
 }

@@ -84,6 +84,8 @@ type blockParser struct {
 	blank                    bool
 	partiallyConsumedTab     bool
 	thematicBreakKillPos     int
+	codeIndentAt             int // where the indentation an indented code block consumed starts
+	frontMatterEnd           int
 	current                  int
 	lastMatchedContainer     int
 	lineQuiet                bool
@@ -109,7 +111,9 @@ func isASCIILetter(c byte) bool { return c|0x20 >= 'a' && c|0x20 <= 'z' }
 // parseTail parses the source again from the restart point.
 func (d *Document) parseTail() {
 	at, off := d.restartAt, d.restart
-	removed := d.truncate(at, off)
+	d.reAt, d.reFrom = at, off
+	defer func() { d.reTo = len(d.src) }()
+	removed := d.truncate(at, off, true)
 	d.parseShown(nil)
 	d.refsChanged(removed, at, off)
 	d.unheal()
@@ -138,7 +142,7 @@ func (d *Document) parseShown(resync func(line int) bool) bool {
 	if d.streaming && d.ext&ExtTables != 0 {
 		// A table's header waits for its delimiter row.
 		if c := d.heldTableRow(cut); c < cut {
-			d.truncate(d.restartAt, d.restart)
+			d.truncate(d.restartAt, d.restart, true)
 			d.parse(d.restart, c, nil)
 			cut = c
 		}
@@ -153,7 +157,10 @@ func (d *Document) parseShown(resync func(line int) bool) bool {
 // from which the blocks parsed before are kept.
 func (d *Document) edit(from, to int, text string) {
 	old := d.src
+	oldFrontMatter := frontMatterEnd(old)
 	delta := len(text) - (to - from)
+	d.shiftLiteralLines(from, to, delta)
+	d.shiftLiveLines(from, to, delta)
 	prev := 0
 	for j, k := 1, 0; j < len(d.blocks); j = d.blocks[j].Next {
 		if int(d.blocks[j].parse.firstLine) > from {
@@ -169,18 +176,30 @@ func (d *Document) edit(from, to int, text string) {
 	if prev > 0 {
 		at, off = d.restartOf(prev)
 	}
-	tail := append([]Block(nil), d.blocks[at:]...)
-	oldSegs := append([]seg(nil), d.segs...)
-	oldDefs := append([]definition(nil), d.defs...)
-	oldRefs := make(map[string]linkRef, len(d.refs))
-	for key, r := range d.refs {
-		oldRefs[key] = r
+	nextSrc := old[:from] + text + old[to:]
+	nextFrontMatter := frontMatterEnd(nextSrc)
+	if oldFrontMatter != nextFrontMatter && (oldFrontMatter < 0 || nextFrontMatter < 0 || oldFrontMatter+delta != nextFrontMatter) {
+		at, off = 1, 0
 	}
+	segBase := len(d.segs)
+	if at < len(d.blocks) {
+		segBase = int(d.blocks[at].segMark)
+	}
+	tail := append([]Block(nil), d.blocks[at:]...)
+	oldSegs := append([]seg(nil), d.segs[segBase:]...)
+	oldDefs := append([]definition(nil), d.defs...)
 	oldRestart, oldRestartAt, oldTail, oldCut := d.restart, d.restartAt, d.tail, d.cut
-	removed := d.truncate(at, off)
-	d.src = old[:from] + text + old[to:]
+	removed := d.truncate(at, off, false)
+	d.src = nextSrc
 	d.restart, d.restartAt = off, at
+	d.reAt, d.reFrom, d.reTo = at, off, len(d.src)
 	editEnd := from + len(text)
+	if nextFrontMatter > editEnd {
+		editEnd = nextFrontMatter + 4
+	}
+	if oldFrontMatter >= 0 && oldFrontMatter+delta+4 > editEnd {
+		editEnd = oldFrontMatter + delta + 4
+	}
 	j, met := 0, -1
 	resync := func(line int) bool {
 		if line < editEnd {
@@ -195,8 +214,11 @@ func (d *Document) edit(from, to int, text string) {
 		}
 		return false
 	}
+	inlLimit := len(tail)
 	if d.parseShown(resync) {
+		inlLimit = met
 		splitAt := int(tail[met].parse.firstLine)
+		d.reTo = splitAt + delta
 		shift := len(d.blocks) - (at + met)
 		for m := met; m < len(tail); m++ {
 			b := tail[m]
@@ -210,7 +232,7 @@ func (d *Document) edit(from, to int, text string) {
 			if b.parse.joined > 0 {
 				b.parse.joined += int32(shift)
 			}
-			segs := oldSegs[b.segA:b.segB]
+			segs := oldSegs[int(b.segA)-segBase : int(b.segB)-segBase]
 			b.segMark = int32(len(d.segs))
 			b.segA = b.segMark
 			for _, sg := range segs {
@@ -222,8 +244,7 @@ func (d *Document) edit(from, to int, text string) {
 			if b.textS >= 0 {
 				b.textS += int32(delta)
 			}
-			if b.inlOK && len(b.inl) > 0 {
-				b.inl = append([]Inline(nil), b.inl...)
+			if delta != 0 && b.inlOK && len(b.inl) > 0 {
 				for x := range b.inl {
 					b.inl[x].Start += delta
 					b.inl[x].End += delta
@@ -259,6 +280,13 @@ func (d *Document) edit(from, to int, text string) {
 		}
 		d.cut = oldCut + delta
 	}
+	for m := 0; m < inlLimit; m++ {
+		b := &tail[m]
+		if b.inlOK && b.segB > b.segA {
+			segs := oldSegs[int(b.segA)-segBase : int(b.segB)-segBase]
+			d.oldInl = append(d.oldInl, oldInline{int(segs[0].start), b.rev, b.text, slices.Clone(segs), b.inl, b.labels, b.healed})
+		}
+	}
 	d.refsChanged(removed, at, off)
 	d.unheal()
 }
@@ -266,13 +294,15 @@ func (d *Document) edit(from, to int, text string) {
 // truncate drops the blocks from index at, parsed from offset off, and
 // the definitions made there, which it returns, keeping their inlines
 // to reuse.
-func (d *Document) truncate(at, off int) map[string]linkRef {
+func (d *Document) truncate(at, off int, saveOldInl bool) map[string]linkRef {
 	clear(d.oldInl)
 	d.oldInl = d.oldInl[:0]
-	for i := at; i < len(d.blocks); i++ {
-		b := &d.blocks[i]
-		if b.inlOK && b.segB > b.segA {
-			d.oldInl = append(d.oldInl, oldInline{int(d.segs[b.segA].start), b.rev, b.text, slices.Clone(d.segsOf(b)), b.inl, b.labels, b.healed})
+	if saveOldInl {
+		for i := at; i < len(d.blocks); i++ {
+			b := &d.blocks[i]
+			if b.inlOK && b.segB > b.segA {
+				d.oldInl = append(d.oldInl, oldInline{int(d.segs[b.segA].start), b.rev, b.text, slices.Clone(d.segsOf(b)), b.inl, b.labels, b.healed})
+			}
 		}
 	}
 	root := &d.blocks[0]
@@ -344,6 +374,7 @@ func (d *Document) refsChanged(removed map[string]linkRef, at, off int) {
 	if len(changed) == 0 {
 		return
 	}
+	d.relinks++
 	for k := range d.oldInl {
 		for _, l := range d.oldInl[k].labels {
 			if containsString(changed, l) {
@@ -382,6 +413,59 @@ func lineStartOf(src string, off int) int {
 		off--
 	}
 	return off
+}
+
+// emptySetextStart returns the start of the blank line immediately before
+// the line being parsed, the empty content line a setext underline with no
+// paragraph above it belongs to. It reports false for the document's first
+// line and when the line before holds text.
+func (p *blockParser) emptySetextStart() (int, bool) {
+	if p.lineStart == 0 {
+		return 0, false
+	}
+	end := p.lineStart - 1
+	if p.src[end] == '\n' && end > 0 && p.src[end-1] == '\r' {
+		end--
+	}
+	start := lineStartOf(p.src, end)
+	if strings.Trim(p.src[start:end], " \t") != "" {
+		return 0, false
+	}
+	return start, true
+}
+
+func frontMatterEnd(src string) int {
+	if !strings.HasPrefix(src, "---") {
+		return -1
+	}
+	at := 0
+	firstNext := -1
+	for {
+		end := at
+		for end < len(src) && src[end] != '\n' && src[end] != '\r' {
+			end++
+		}
+		line := src[at:end]
+		if at == 0 && line != "---" {
+			return -1
+		}
+		if at > 0 && (line == "---" || line == "...") {
+			if at == firstNext {
+				return -1
+			}
+			return at
+		}
+		if end == len(src) {
+			return -1
+		}
+		at = end + 1
+		if src[end] == '\r' && at < len(src) && src[at] == '\n' {
+			at++
+		}
+		if firstNext < 0 {
+			firstNext = at
+		}
+	}
 }
 
 // displayCut returns where the source shown ends: while streaming, a
@@ -438,7 +522,7 @@ func (d *Document) heldTableRow(cut int) int {
 // parse parses the source from off, a line's start, to end, with no
 // block open but the root, adding blocks after those there are.
 func (d *Document) parse(off, end int, resync func(line int) bool) bool {
-	p := &blockParser{d: d, src: d.src[:end], ext: d.ext, current: 0, resync: resync}
+	p := &blockParser{d: d, src: d.src[:end], ext: d.ext, current: 0, resync: resync, frontMatterEnd: frontMatterEnd(d.src)}
 	d.inp.reset()
 	d.tail = -1
 	d.restart, d.restartAt = off, len(d.blocks)
@@ -554,6 +638,7 @@ func (p *blockParser) processLine(start, end int) {
 	p.indent = 0
 	p.blank = false
 	p.partiallyConsumedTab = false
+	p.codeIndentAt = -1
 	if start == 0 && strings.HasPrefix(p.ln, "\xef\xbb\xbf") {
 		p.offset = 3
 	}
@@ -628,7 +713,7 @@ func canContain(parent, child Kind) bool {
 }
 
 func acceptsLines(k Kind) bool {
-	return k == Paragraph || k == Heading || k == CodeBlock || k == MathBlock
+	return k == Paragraph || k == Heading || k == FrontMatter || k == CodeBlock || k == MathBlock
 }
 
 // removeLast removes block i, the last, an empty paragraph.
@@ -649,6 +734,7 @@ func (p *blockParser) finalize(i int) int {
 	b.parse.open = false
 	b.Next = len(d.blocks)
 	switch {
+	case b.Kind == MathBlock && b.parse.mathDone:
 	case b.segB > b.segA:
 		b.End = int(d.segs[b.segB-1].end)
 	case b.parse.lastChild >= 0:
@@ -692,7 +778,10 @@ func (p *blockParser) finalize(i int) int {
 		}
 	case Item:
 		if b.parse.lastChild < 0 {
-			b.End = b.Start + 1
+			// The item's own line is the item: its marker bytes end the
+			// block, so what follows starts at the line's end rather than
+			// one byte into the marker (record 2026-11-12, seed14/c4).
+			b.End = max(b.End, lineEndFrom(p.d.src, b.Start))
 		}
 	case Quote:
 		if b.parse.alert != NoAlert {
@@ -764,6 +853,18 @@ func (p *blockParser) firstChild(i int) int {
 	return i + 1
 }
 
+// lineEndFrom returns the offset of the line ending that ends the line
+// starting at from, or the source's length when that line is the last.
+func lineEndFrom(src string, from int) int {
+	from = max(0, min(from, len(src)))
+	for at := from; at < len(src); at++ {
+		if src[at] == '\n' || src[at] == '\r' {
+			return at
+		}
+	}
+	return len(src)
+}
+
 func (p *blockParser) nextSibling(i int) int {
 	b := &p.d.blocks[i]
 	n := b.Next
@@ -798,12 +899,27 @@ func (p *blockParser) resolveDefinitions(i int) bool {
 	if b.segB == b.segA {
 		return false
 	}
-	if first := d.segs[b.segA]; d.src[first.start] != '[' || first.pad != 0 {
+	first := d.segs[b.segA]
+	at := int(first.start)
+	if d.ext&ExtTyporaContentSpace != 0 {
+		// Typora keeps leading content whitespace, and a definition may
+		// follow it.
+		for at < int(first.end) && isSpaceOrTab(d.src[at]) {
+			at++
+		}
+	}
+	if at >= int(first.end) || d.src[at] != '[' || first.pad != 0 {
 		return true
 	}
 	text, _ := d.contentOf(i)
 	m := d.sourceMap(i)
 	pos := 0
+	if d.ext&ExtTyporaContentSpace != 0 {
+		for pos < len(text) && isSpaceOrTab(text[pos]) {
+			pos++
+		}
+	}
+	start := pos
 	for pos < len(text) && text[pos] == '[' {
 		d.steps++
 		n := d.inp.parseReference(d, text[pos:], m.source(pos))
@@ -812,7 +928,7 @@ func (p *blockParser) resolveDefinitions(i int) bool {
 		}
 		pos += n
 	}
-	if pos == 0 {
+	if pos == start {
 		return true
 	}
 	// Drop the lines the definitions took.
@@ -870,7 +986,7 @@ func (d *Document) appendSeg(i int, s seg) {
 
 // addLine adds the rest of the line to the content of block i.
 func (p *blockParser) addLine(i int) {
-	s := seg{start: int32(p.lineStart + p.offset), end: int32(p.lineStart + len(p.ln))}
+	s := seg{start: int32(p.lineStart + p.offset), end: int32(p.lineStart + len(p.ln)), indent: -1}
 	if p.partiallyConsumedTab {
 		p.offset++
 		s.start++
@@ -878,6 +994,12 @@ func (p *blockParser) addLine(i int) {
 	}
 	if s.start > s.end {
 		s.start = s.end
+	}
+	if b := &p.d.blocks[i]; b.Kind == CodeBlock && !b.Fenced && p.codeIndentAt >= 0 {
+		// An indented code block keeps the indentation it consumes as the
+		// line's first column, as the block's mark does (record 2026-11-12,
+		// probe94/leading-tab-gt).
+		s.indent = int32(s.start) - int32(p.codeIndentAt)
 	}
 	p.d.appendSeg(i, s)
 	p.d.blocks[i].End = int(s.end)
@@ -976,6 +1098,7 @@ func (p *blockParser) checkOpenBlocks(allMatched *bool) (int, bool) {
 		case CodeBlock:
 			if !b.Fenced {
 				if p.indent >= codeIndent {
+					p.codeIndentAt = p.lineStart + p.offset
 					p.advanceOffset(codeIndent, true)
 				} else if p.blank {
 					p.advanceOffset(p.firstNonspace-p.offset, false)
@@ -1009,9 +1132,11 @@ func (p *blockParser) checkOpenBlocks(allMatched *bool) (int, bool) {
 				matched = !p.blank
 			}
 		case Paragraph:
-			matched = !p.blank
+			matched = !p.blank || p.typoraWhitespaceContent(b) || p.typoraLiveWhitespaceContent(b)
 		case Table:
 			matched = !p.blank && rowHasCells(p.ln[p.firstNonspace:])
+		case FrontMatter:
+			matched = true
 		}
 		if !matched {
 			return b.Parent, true
@@ -1024,12 +1149,23 @@ func (p *blockParser) checkOpenBlocks(allMatched *bool) (int, bool) {
 func (p *blockParser) blockQuotePrefix() bool {
 	if p.indent <= 3 && p.peek(p.firstNonspace) == '>' {
 		p.advanceOffset(p.indent+1, true)
-		if isSpaceOrTab(p.peek(p.offset)) {
-			p.advanceOffset(1, true)
-		}
+		p.skipQuoteSeparator()
 		return true
 	}
 	return false
+}
+
+// skipQuoteSeparator consumes the one space that separates a quotation
+// marker from its content. Typora keeps any further whitespace as content.
+func (p *blockParser) skipQuoteSeparator() {
+	if !isSpaceOrTab(p.peek(p.offset)) {
+		return
+	}
+	if p.ext&ExtTyporaContentSpace != 0 {
+		p.advanceOffset(1, false)
+	} else {
+		p.advanceOffset(1, true)
+	}
 }
 
 // openNewBlocks opens the blocks the line starts inside container.
@@ -1044,17 +1180,19 @@ func (p *blockParser) openNewBlocks(container *int, allMatched bool) {
 		c := p.peek(p.firstNonspace)
 		cont := *container
 		contKind := d.blocks[cont].Kind
+		// Only markers starting the live line's content are literal.
+		// Markers before literalAt belong to its existing quote/list
+		// containers and must still parse.
+		literal := d.isLiteralLine(p.lineStart, p.lineStart+p.firstNonspace)
 		var n int
 		switch {
-		case !indented && c == '>' && depth < maxDepth:
+		case !literal && !indented && c == '>' && depth < maxDepth:
 			start := p.lineStart + p.firstNonspace
 			p.advanceOffset(p.firstNonspace+1-p.offset, false)
-			if isSpaceOrTab(p.peek(p.offset)) {
-				p.advanceOffset(1, true)
-			}
+			p.skipQuoteSeparator()
 			*container = p.addChild(cont, Quote, start)
 
-		case !indented && c == '#' && func() bool { n = scanATXStart(p.ln, p.firstNonspace); return n > 0 }():
+		case !literal && !indented && c == '#' && func() bool { n = scanATXStart(p.ln, p.firstNonspace, p.ext&ExtTyporaContentSpace != 0); return n > 0 }():
 			start := p.lineStart + p.firstNonspace
 			level := 0
 			for p.peek(p.firstNonspace+level) == '#' {
@@ -1064,7 +1202,7 @@ func (p *blockParser) openNewBlocks(container *int, allMatched bool) {
 			*container = p.addChild(cont, Heading, start)
 			d.blocks[*container].Level = level
 
-		case !indented && (c == '`' || c == '~') && func() bool { n = scanOpenFence(p.ln, p.firstNonspace); return n > 0 }():
+		case !literal && !indented && (c == '`' || c == '~') && func() bool { n = scanOpenFence(p.ln, p.firstNonspace); return n > 0 }():
 			start := p.lineStart + p.firstNonspace
 			*container = p.addChild(cont, CodeBlock, start)
 			b := &d.blocks[*container]
@@ -1072,11 +1210,14 @@ func (p *blockParser) openNewBlocks(container *int, allMatched bool) {
 			b.parse.fenceChar = c
 			b.parse.fenceLength = int32(n)
 			b.parse.fenceOffset = int32(p.firstNonspace - p.offset)
+			b.FenceChar = c
+			b.FenceLength = n
+			b.ContentIndent = p.firstNonspace - p.offset
 			b.info = unescapeString(strings.Trim(p.ln[p.firstNonspace+n:], " \t"))
 			b.End = p.lineStart + len(p.ln)
 			p.advanceOffset(len(p.ln)-p.offset, false)
 
-		case !indented && c == '<' && func() bool {
+		case !literal && !indented && c == '<' && func() bool {
 			n = scanHTMLBlockStart(p.ln, p.firstNonspace)
 			if n == 0 && contKind != Paragraph && !(!allMatched && d.blocks[p.current].Kind == Paragraph) {
 				n = scanHTMLBlockStart7(p.ln, p.firstNonspace)
@@ -1086,23 +1227,52 @@ func (p *blockParser) openNewBlocks(container *int, allMatched bool) {
 			*container = p.addChild(cont, HTMLBlock, p.lineStart+p.firstNonspace)
 			d.blocks[*container].parse.htmlType = int8(n)
 
-		case !indented && contKind == Paragraph && (c == '=' || c == '-') && func() bool { n = scanSetextLine(p.ln, p.firstNonspace); return n > 0 }():
-			if p.resolveDefinitionsOpen(cont) {
+		case !literal && !indented && contKind == Paragraph && (c == '=' || c == '-') && func() bool { n = scanSetextLine(p.ln, p.firstNonspace); return n > 0 }():
+			if p.ext&ExtNestedOrderedLists != 0 && d.blocks[cont].Parent >= 0 && d.blocks[d.blocks[cont].Parent].Kind == Item && c == '-' && p.peek(p.firstNonspace+1) != '-' {
+				if p.listItemStart(container) {
+					break
+				}
+			}
+			if p.resolveDefinitions(cont) {
 				b := &d.blocks[cont]
 				b.Kind = Heading
 				b.Level = n
+				b.Setext = true
 				b.End = p.lineStart + len(p.ln)
 				p.advanceOffset(len(p.ln)-p.offset, false)
 			}
 
-		case !indented && !(contKind == Paragraph && !allMatched) && p.thematicBreakKillPos <= p.firstNonspace && func() bool { n = p.scanThematicBreak(p.firstNonspace); return n > 0 }():
+		case !literal && !indented && c == '=' && contKind != Paragraph && p.ext&ExtTyporaEmptySetext != 0 &&
+			func() bool { n = scanSetextLine(p.ln, p.firstNonspace); return n > 0 }():
+			start, ok := p.emptySetextStart()
+			if !ok {
+				return
+			}
+			// Typora reads a setext underline with no paragraph above it as
+			// the underline of an empty heading: the blank line before the
+			// underline is the heading's empty content line, and Typora
+			// reports the block from that line's start through the underline
+			// (record 2026-11-10, seed9/c13).
+			*container = p.addChild(cont, Heading, start)
+			b := &d.blocks[*container]
+			b.Level = 1
+			b.Setext = true
+			b.parse.firstLine = int32(start)
+			d.appendSeg(*container, seg{start: int32(start), end: int32(start)})
+			b.End = start
+			p.advanceOffset(len(p.ln)-p.offset, false)
+
+		case !literal && !indented && p.ext&ExtFrontMatter != 0 && p.lineStart == 0 && p.frontMatterEnd > 0:
+			*container = p.addChild(cont, FrontMatter, 0)
+
+		case !literal && !indented && !(contKind == Paragraph && !allMatched) && p.thematicBreakKillPos <= p.firstNonspace && func() bool { n = p.scanThematicBreak(p.firstNonspace); return n > 0 }():
 			*container = p.addChild(cont, ThematicBreak, p.lineStart+p.firstNonspace)
 			d.blocks[*container].End = p.lineStart + len(p.ln)
 			p.advanceOffset(len(p.ln)-p.offset, false)
 
-		case !indented && p.ext&ExtMath != 0 && (c == '$' || c == '\\') && p.mathStart(container):
+		case !literal && !indented && p.ext&ExtMath != 0 && (c == '$' || c == '\\') && p.mathStart(container):
 
-		case !indented && p.ext&ExtFootnotes != 0 && c == '[' && depth < maxDepth && func() bool { n = scanFootnoteDef(p.ln, p.firstNonspace); return n > 0 }():
+		case !literal && !indented && p.ext&ExtFootnotes != 0 && c == '[' && depth < maxDepth && func() bool { n = scanFootnoteDef(p.ln, p.firstNonspace); return n > 0 }():
 			label := p.ln[p.firstNonspace+2:]
 			label = label[:strings.IndexByte(label, ']')]
 			start := p.lineStart + p.firstNonspace
@@ -1113,17 +1283,27 @@ func (p *blockParser) openNewBlocks(container *int, allMatched bool) {
 				d.notes[key] = *container
 			}
 
-		case (!indented || contKind == List) && p.indent < 4 && depth < maxDepth && p.listItemStart(container):
+		case !literal && (!indented || contKind == List) && p.indent < 4 && depth < maxDepth && p.listItemStart(container):
 
-		case indented && !maybeLazy && !p.blank:
+		case !literal && indented && !maybeLazy && !p.blank:
+			p.codeIndentAt = p.lineStart + p.offset
 			p.advanceOffset(codeIndent, true)
 			*container = p.addChild(cont, CodeBlock, p.lineStart+p.offset)
 
-		case !indented && p.ext&ExtTables != 0 && contKind == Paragraph && p.tableStart(container):
+		case !literal && !indented && p.ext&ExtTables != 0 && contKind == Paragraph && p.tableStart(container):
 
-		case !indented && p.ext&ExtTables != 0 && contKind == Table && !p.blank:
+		case !literal && !indented && p.ext&ExtTables != 0 && contKind == Table && !p.blank:
 			p.tableRow(cont)
 			*container = cont
+
+		case !literal && p.blank && p.ext&ExtTyporaContentSpace != 0 && p.lineStart > 0 &&
+			p.d.IsLiveLine(p.lineStart-1) && cont == 0:
+			// A whitespace-only line right after the line break this session
+			// typed stays the paragraph's continuation: Shift+Enter holds the
+			// break in the view, and the tab typed on the line it opens is the
+			// paragraph's content rather than a blank line that ends it
+			// (record 2026-11-12, seed15/c3).
+			*container = p.addChild(cont, Paragraph, p.lineStart)
 
 		default:
 			return
@@ -1140,7 +1320,7 @@ func (p *blockParser) openNewBlocks(container *int, allMatched bool) {
 func (p *blockParser) takesBlocks(i int) bool {
 	b := &p.d.blocks[i]
 	switch b.Kind {
-	case CodeBlock, HTMLBlock:
+	case CodeBlock, HTMLBlock, FrontMatter:
 		return false
 	case MathBlock:
 		return b.parse.mathDone
@@ -1148,18 +1328,17 @@ func (p *blockParser) takesBlocks(i int) bool {
 	return true
 }
 
-// resolveDefinitionsOpen takes the definitions off the start of the open
-// paragraph i before it becomes a setext heading, and reports whether
-// text remains.
-func (p *blockParser) resolveDefinitionsOpen(i int) bool {
-	b := &p.d.blocks[i]
-	if b.segB == b.segA {
-		return false
-	}
-	if p.d.src[p.d.segs[b.segA].start] != '[' {
+// listMarkerSpace reports whether the byte after a list marker separates
+// it from the item's content. Typora needs a space or tab there: a marker
+// that ends its line is paragraph text, as a lone `-`, `*` or `1.` is
+// (record 2026-11-10, seed6/empty-emphasis-leaves-list and the open-state
+// probe of `*\n\n*`). The strict profiles read the marker alone as an
+// empty item.
+func listMarkerSpace(p *blockParser, pos int) bool {
+	if isSpaceOrTab(p.peek(pos)) {
 		return true
 	}
-	return p.resolveDefinitions(i)
+	return p.ext&ExtTyporaContentSpace == 0 && isLineEnd(p.peek(pos))
 }
 
 // listItemStart opens a list item, and its list unless the container is
@@ -1168,6 +1347,7 @@ func (p *blockParser) listItemStart(container *int) bool {
 	d := p.d
 	cont := *container
 	interrupts := d.blocks[cont].Kind == Paragraph
+	nested := interrupts && p.ext&ExtNestedOrderedLists != 0 && d.blocks[cont].Parent >= 0 && d.blocks[d.blocks[cont].Parent].Kind == Item
 	pos := p.firstNonspace
 	c := p.peek(pos)
 	var ordered bool
@@ -1176,10 +1356,10 @@ func (p *blockParser) listItemStart(container *int) bool {
 	switch {
 	case c == '*' || c == '-' || c == '+':
 		pos++
-		if !isSpaceOrTab(p.peek(pos)) && !isLineEnd(p.peek(pos)) {
+		if !listMarkerSpace(p, pos) {
 			return false
 		}
-		if interrupts {
+		if interrupts && !nested {
 			i := pos
 			for isSpaceOrTab(p.peek(i)) {
 				i++
@@ -1196,7 +1376,7 @@ func (p *blockParser) listItemStart(container *int) bool {
 			pos++
 			digits++
 		}
-		if interrupts && number != 1 {
+		if interrupts && !nested && number != 1 {
 			return false
 		}
 		c = p.peek(pos)
@@ -1204,10 +1384,10 @@ func (p *blockParser) listItemStart(container *int) bool {
 			return false
 		}
 		pos++
-		if !isSpaceOrTab(p.peek(pos)) && !isLineEnd(p.peek(pos)) {
+		if !listMarkerSpace(p, pos) {
 			return false
 		}
-		if interrupts {
+		if interrupts && !nested {
 			i := pos
 			for isSpaceOrTab(p.peek(i)) {
 				i++
@@ -1230,7 +1410,15 @@ func (p *blockParser) listItemStart(container *int) bool {
 	}
 	i := p.column - savedColumn
 	padding := matched + i
-	if i >= 5 || i < 1 || isLineEnd(p.peek(p.offset)) {
+	if p.ext&ExtTyporaContentSpace != 0 {
+		// One space separates a marker from its content; the rest is
+		// content whitespace.
+		padding = matched + 1
+		p.offset, p.column, p.partiallyConsumedTab = savedOffset, savedColumn, savedTab
+		if isSpaceOrTab(p.peek(p.offset)) {
+			p.advanceOffset(1, false)
+		}
+	} else if i >= 5 || i < 1 || isLineEnd(p.peek(p.offset)) {
 		padding = matched + 1
 		p.offset, p.column, p.partiallyConsumedTab = savedOffset, savedColumn, savedTab
 		if i > 0 {
@@ -1270,21 +1458,20 @@ func (p *blockParser) taskMarker(item int) {
 	if c != ' ' && c != 'x' && c != 'X' || !isSpaceOrTab(p.peek(i+3)) {
 		return
 	}
-	// Text must follow, as GitHub asks.
-	j := i + 3
-	for isSpaceOrTab(p.peek(j)) {
-		j++
-	}
-	if isLineEnd(p.peek(j)) {
-		return
-	}
 	b := &p.d.blocks[item]
 	if c == ' ' {
 		b.Task = Unchecked
 	} else {
 		b.Task = Checked
 	}
-	p.advanceOffset(4, true)
+	if p.ext&ExtTyporaContentSpace != 0 {
+		p.advanceOffset(3, false)
+		if isSpaceOrTab(p.peek(p.offset)) {
+			p.advanceOffset(1, false)
+		}
+	} else {
+		p.advanceOffset(4, true)
+	}
 }
 
 // mathStart opens a block of display math at a line starting with $$ or
@@ -1424,11 +1611,12 @@ func (p *blockParser) addTextToContainer(container int) {
 	d := p.d
 	p.findFirstNonspace()
 	cb := &d.blocks[container]
+	content := p.typoraWhitespaceContent(cb) || p.typoraLiveWhitespaceContent(cb)
 	if p.blank && cb.parse.lastChild >= 0 {
 		d.blocks[cb.parse.lastChild].parse.lastLineBlank = true
 	}
 	ck := cb.Kind
-	lastLineBlank := p.blank && ck != Quote && ck != Heading && ck != ThematicBreak &&
+	lastLineBlank := p.blank && !content && ck != Quote && ck != Heading && ck != FrontMatter && ck != ThematicBreak &&
 		!(ck == CodeBlock && cb.Fenced) && ck != MathBlock &&
 		!(ck == Item && cb.parse.lastChild < 0 && int(cb.parse.startLine) == p.lineNum)
 	cb.parse.lastLineBlank = lastLineBlank
@@ -1473,26 +1661,82 @@ func (p *blockParser) addTextToContainer(container int) {
 		if htmlBlockEnds(int(cb.parse.htmlType), p.ln[p.firstNonspace:]) {
 			container = p.finalize(container)
 		}
-	case p.blank:
+	case cb.Kind == FrontMatter:
+		p.addLine(container)
+		if p.lineStart == p.frontMatterEnd {
+			container = p.finalize(container)
+		}
+	case p.blank && !content && !(p.ext&ExtTyporaContentSpace != 0 && cb.Kind == Item &&
+		cb.parse.lastChild < 0 && int(cb.parse.startLine) == p.lineNum && p.offset < len(p.ln)):
+		// Typora keeps the whitespace after an item's one-space
+		// separator as content, even when it is the item's only
+		// content: "-  " is an item showing one space, not an empty
+		// item.
 	case acceptsLines(cb.Kind) && cb.Kind != MathBlock:
 		if cb.Kind == Heading {
 			p.addHeadingText(container)
 		} else {
-			p.advanceOffset(p.firstNonspace-p.offset, false)
+			// 容器前缀已经在 checkOpenBlocks 里消费掉 W 列，offset 处就是
+			// 内容起点。Typora 把续行里超出 W 的空白显示为内容，不能再
+			// 跳到 firstNonspace（记录 2026-11-11，seed9/c9）。
+			if p.ext&ExtTyporaContentSpace == 0 {
+				p.advanceOffset(p.firstNonspace-p.offset, false)
+			}
 			p.addLine(container)
 		}
 	default:
-		container = p.addChild(container, Paragraph, p.lineStart+p.firstNonspace)
-		p.advanceOffset(p.firstNonspace-p.offset, false)
+		start := p.lineStart + p.firstNonspace
+		if p.ext&ExtTyporaContentSpace != 0 {
+			// 同上：剩下的空白属于段落内容。
+			start = p.lineStart + p.offset
+		} else {
+			p.advanceOffset(p.firstNonspace-p.offset, false)
+		}
+		container = p.addChild(container, Paragraph, start)
 		p.addLine(container)
 	}
 	p.current = container
 }
 
+// typoraWhitespaceContent reports whether the line at b's paragraph holds
+// only whitespace past the list item's indent. Typora's editor keeps such
+// a line in the paragraph as the line a soft break shows: Shift+Enter's
+// continuation prefix runs up to the item's indent, and the whitespace
+// that followed the caret on the line stays the paragraph's content
+// (record 2026-11-10, seed6/ordered-softbreak-in-item). A line of just the
+// indent holds no content and stays a blank line, as a paragraph outside
+// an item keeps every whitespace-only line.
+func (p *blockParser) typoraWhitespaceContent(b *Block) bool {
+	if p.ext&ExtTyporaContentSpace == 0 || !p.blank || p.firstNonspace <= p.offset || b.Kind != Paragraph {
+		return false
+	}
+	parent := b.Parent
+	return parent > 0 && p.d.blocks[parent].Kind == Item
+}
+
+// typoraLiveWhitespaceContent reports whether the blank line at b's
+// paragraph follows a line break this session typed. Typora's editor keeps
+// such a line in the paragraph: Shift+Enter holds the break in the view, and
+// the tab typed on the line it opens stays the paragraph's content instead
+// of ending it (record 2026-11-12, seed15/c3). The same bytes reopened from
+// a file leave the line blank, as Markdown reads them.
+func (p *blockParser) typoraLiveWhitespaceContent(b *Block) bool {
+	if p.ext&ExtTyporaContentSpace == 0 || !p.blank || p.firstNonspace <= p.offset || b.Kind != Paragraph {
+		return false
+	}
+	return p.lineStart > 0 && p.d.IsLiveLine(p.lineStart-1)
+}
+
 // addHeadingText adds the text of an ATX heading, without its closing
 // sequence of #.
 func (p *blockParser) addHeadingText(h int) {
-	p.advanceOffset(p.firstNonspace-p.offset, false)
+	if p.ext&ExtTyporaContentSpace != 0 {
+		if isSpaceOrTab(p.peek(p.offset)) {
+			p.advanceOffset(1, false)
+		}
+	} else {
+		p.advanceOffset(p.firstNonspace-p.offset, false)
+	}
 	start, end := p.offset, len(p.ln)
 	for end > start && isSpaceOrTab(p.ln[end-1]) {
 		end--

@@ -541,7 +541,10 @@ func makeLanguages() {
 	markdown := &Language{
 		Name: "Markdown", Extensions: []string{".md", ".markdown", ".mdx", ".mkd"}, Filenames: []string{"README", "CHANGELOG"},
 		BlockComment: [2]string{"<!--", "-->"}, Brackets: cBrackets,
-		AutoClose: []BracketPair{{Open: "(", Close: ")"}, {Open: "[", Close: "]"}, {Open: "{", Close: "}"}, {Open: "`", Close: "`", NotIn: notInText}},
+		AutoClose: []BracketPair{
+			{Open: "(", Close: ")"}, {Open: "[", Close: "]"}, {Open: "{", Close: "}"},
+			{Open: "\"", Close: "\"", NotIn: notInText}, {Open: "'", Close: "'", NotIn: notInText},
+		},
 		TabSize:   2,
 		Tokenizer: &markdownLexer{},
 	}

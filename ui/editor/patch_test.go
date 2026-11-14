@@ -128,10 +128,10 @@ const commentPatch = `diff --git a/compare.cpp b/compare.cpp
 @@ -1,7 +1,7 @@
  #include <cstdlib>
  #include <vector>
- 
+
 -int threshold = 24;
 +int threshold = 32;
- 
+
  /**
   * Compares two RGBA frames pixel by pixel.
 @@ -27,3 +27,3 @@ int compare(...)
@@ -270,7 +270,7 @@ func TestPatchHunksHighlightApartStrings(t *testing.T) {
 @@ -1,4 +1,4 @@
 -import os
 +import sys
- 
+
  def f():
      """Does f.
 @@ -20,3 +20,3 @@ def f():
@@ -367,7 +367,7 @@ func TestPatchRestartsOnSnapshot(t *testing.T) {
 @@ -1,3 +1,3 @@
 -import os
 +import sys
- 
+
  x = 1
 @@ -20,2 +20,2 @@ def f():
 -    return 1

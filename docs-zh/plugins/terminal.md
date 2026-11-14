@@ -88,8 +88,8 @@ term, err := terminal.New(terminal.Options{
 
   ```go
   term, err := terminal.New(terminal.Options{
-  	Padding:      terminal.Padding{X: 14, Y: 8},
-  	PaddingColor: terminal.PaddingExtend,
+	Padding:      terminal.Padding{X: 14, Y: 8},
+	PaddingColor: terminal.PaddingExtend,
   })
   ```
 - `OptionAsAlt` 让 macOS 上的 Option 成为程序的 Alt 键（Meta），而不是输入重音字母的键：Option-E 发送 Esc 和 e，而不是原本会输入的 ´。
@@ -102,26 +102,26 @@ term, err := terminal.New(terminal.Options{
 
   ```go
   OnClipboardRequest: func(req terminal.ClipboardRequest) {
-  	if req.Text == "" && !req.List {
-  		req.Deny() // nothing to leak
-  		return
-  	}
-  	askTheUser(func(ok bool) {
-  		if ok {
-  			req.Allow()
-  		} else {
-  			req.Deny()
-  		}
-  	})
+	if req.Text == "" && !req.List {
+		req.Deny() // nothing to leak
+		return
+	}
+	askTheUser(func(ok bool) {
+		if ok {
+			req.Allow()
+		} else {
+			req.Deny()
+		}
+	})
   },
   ```
 - `OnCopy` 在终端把文本写入剪贴板之后于主线程上运行，带上复制的原因：`CopyUser`（复制键、上下文菜单、执行复制的次要点击）、`CopySelect`（`CopyOnSelect`）或 `CopyProgram`（OSC 52）。应用可以告知这一点，如同 Ghostty 的 `app-notifications = clipboard-copy` 用提示条所做：
 
   ```go
   OnCopy: func(text string, by terminal.CopySource) {
-  	if by != terminal.CopyProgram {
-  		showToast("Copied to clipboard")
-  	}
+	if by != terminal.CopyProgram {
+		showToast("Copied to clipboard")
+	}
   },
   ```
 - `OnClear` 在终端执行用户的清除操作前于主线程上调用：绑定到 `ActionClearScreen` 的按键和上下文菜单中的清除操作都会传入 `ClearScreen`。返回值表示是否接管操作；若接管，本地终端便不执行清除。显示服务器终端的窗口可接管操作，交由服务器端清除（见[在别处显示服务器的终端](#在别处显示服务器的终端)）。在全屏程序的屏幕上不会调用此回调。
@@ -132,12 +132,12 @@ term, err := terminal.New(terminal.Options{
 
   ```go
   OnPaste: func(d transfer.Data) bool {
-  	files, _ := d.Files()
-  	if len(files) == 0 {
-  		return false // text pastes as usual
-  	}
-  	go func() { term.Paste(strings.Join(upload(files), " ")) }()
-  	return true
+	files, _ := d.Files()
+	if len(files) == 0 {
+		return false // text pastes as usual
+	}
+	go func() { term.Paste(strings.Join(upload(files), " ")) }()
+	return true
   },
   ```
 
@@ -201,8 +201,8 @@ term, err := terminal.New(terminal.Options{Font: terminal.Font{
   var fonts embed.FS
 
   for _, name := range []string{"Regular", "Bold", "Italic", "BoldItalic"} {
-  	data, _ := fonts.ReadFile("fonts/JetBrainsMono-" + name + ".ttf")
-  	ui.RegisterFont(data, "JetBrains Mono")
+	data, _ := fonts.ReadFile("fonts/JetBrainsMono-" + name + ".ttf")
+	ui.RegisterFont(data, "JetBrains Mono")
   }
   ```
 

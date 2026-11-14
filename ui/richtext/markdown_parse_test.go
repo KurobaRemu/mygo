@@ -51,16 +51,21 @@ func TestParseMarkdown(t *testing.T) {
 	}{
 		{"- item\n\n  more\n\n      code\n- next", TextOf(
 			para(ParagraphStyle{List: Bullets}, Run{Text: "item"}),
-			para(ParagraphStyle{Indent: 1}, Run{Text: "more"}),
-			para(ParagraphStyle{Indent: 1, CodeBlock: true}, Run{Text: "code"}),
+			// A paragraph in an item carries the item's list style, as
+			// Typora reports it; a code block below keeps the indent.
+			para(ParagraphStyle{List: Bullets}, Run{Text: "more"}),
+			// The block's own four spaces are its text; the item's two are
+			// the item's, as Typora's mark of the block keeps only those
+			// (record 2026-11-12, probe94/leading-tab-gt).
+			para(ParagraphStyle{Indent: 1, CodeBlock: true}, Run{Text: "    code"}),
 			para(ParagraphStyle{List: Bullets}, Run{Text: "next"}),
 		)},
 		{"> - [x] done\n>   - nested", TextOf(
 			para(ParagraphStyle{List: Tasks, Checked: true, Quote: true}, Run{Text: "done"}),
 			para(ParagraphStyle{List: Bullets, Indent: 1, Quote: true}, Run{Text: "nested"}),
 		)},
-		{"a  \nb", TextOf(para(ParagraphStyle{}, Run{Text: "a"}), para(ParagraphStyle{}, Run{Text: "b"}))},
-		{"1. a\\\n   b", TextOf(para(ParagraphStyle{List: Numbers}, Run{Text: "a"}), para(ParagraphStyle{Indent: 1}, Run{Text: "b"}))},
+		{"a  \nb", TextOf(para(ParagraphStyle{}, Run{Text: "a\u2028b"}))},
+		{"1. a\\\n   b", TextOf(para(ParagraphStyle{List: Numbers}, Run{Text: "a\u2028b"}))},
 		{"| a | b |\n|---|---|\n| 1 | **2** |", TextOf(
 			para(ParagraphStyle{}, Run{Text: "a\tb", Attributes: bold}),
 			para(ParagraphStyle{}, Run{Text: "1\t"}, Run{Text: "2", Attributes: bold}),
@@ -78,6 +83,78 @@ func TestParseMarkdown(t *testing.T) {
 	} {
 		if got := ParseMarkdown(c.src); dump(got) != dump(c.want) {
 			t.Errorf("%q:\ngot\n%s\nwant\n%s", c.src, dump(got), dump(c.want))
+		}
+	}
+}
+
+// The blank quote lines after a quote's list item are paragraphs of the
+// quote. ParseMarkdown keeps no source maps, and the style the blank line
+// takes must not be looked up in them: the plain read builds paragraphs
+// only, so the maps are empty.
+func TestParseMarkdownQuoteBlankTailAfterItem(t *testing.T) {
+	src := ">- a\n>\n>\n"
+	want, _ := ParseMarkdownSource(src)
+	if got := ParseMarkdown(src); dump(got) != dump(want) {
+		t.Errorf("got\n%s\nwant\n%s", dump(got), dump(want))
+	}
+}
+
+func TestMarkdownProjectionKeepsLeadingWhitespace(t *testing.T) {
+	tests := []struct {
+		src  string
+		want string
+	}{
+		{"alpha\n\n beta\n", " beta"},
+		{"#  beta\n", " beta"},
+		{"# \talpha beta\n", "\talpha beta"},
+		{">  beta\n", " beta"},
+		{">   beta\n", "  beta"},
+		{"-  beta\n", " beta"},
+		{"-   beta\n", "  beta"},
+		{"1.  beta\n", " beta"},
+		{"1.   beta\n", "  beta"},
+		{"- [ ]  beta\n", " beta"},
+		{"> -  beta\n", " beta"},
+		{"> - [ ]  beta\n", " beta"},
+		{"alpha\n\n  beta\n", "  beta"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.src, func(t *testing.T) {
+			text, _ := ParseMarkdownSource(tt.src)
+			if got := plainOf(text.paragraph(text.ParagraphCount() - 1)); got != tt.want {
+				t.Fatalf("%q paragraph = %q, want %q", tt.src, got, tt.want)
+			}
+			text = ParseMarkdown(tt.src)
+			if got := plainOf(text.paragraph(text.ParagraphCount() - 1)); got != tt.want {
+				t.Fatalf("%q ParseMarkdown paragraph = %q, want %q", tt.src, got, tt.want)
+			}
+			if err := NewMarkdownDocument(tt.src).CheckSource(); err != nil {
+				t.Fatalf("%q source map: %v", tt.src, err)
+			}
+		})
+	}
+}
+
+// TestMarkdownProjectionKeepsContinuationUnindented: 段落行首只把列表项
+// 的内容缩进 W 当前缀，超出 W 的空白是内容，Typora 显示它（记录
+// 2026-11-11，seed9/c9）。
+func TestMarkdownProjectionKeepsContinuationUnindented(t *testing.T) {
+	tests := []struct{ src, want string }{
+		{"- alpha\n  continuation\n", "alpha\u2028continuation"},
+		{"- alpha\n   continuation\n", "alpha\u2028 continuation"},
+		{"- alpha\n\n  continuation\n", "continuation"},
+		{"- alpha\n\n   continuation\n", " continuation"},
+		{"- alpha\n\n    continuation\n", "  continuation"},
+		{"> - alpha\n>\n>      continuation\n", "   continuation"},
+	}
+	for _, tt := range tests {
+		text, _ := ParseMarkdownSource(tt.src)
+		if got := plainOf(text.paragraph(text.ParagraphCount() - 1)); got != tt.want {
+			t.Errorf("ParseMarkdownSource %q continuation = %q, want %q", tt.src, got, tt.want)
+		}
+		text = ParseMarkdown(tt.src)
+		if got := plainOf(text.paragraph(text.ParagraphCount() - 1)); got != tt.want {
+			t.Errorf("ParseMarkdown %q continuation = %q, want %q", tt.src, got, tt.want)
 		}
 	}
 }

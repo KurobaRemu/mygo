@@ -274,6 +274,14 @@ func (st *State) Selection() Selection {
 // SetSelections sets the selections, the last the newest, and scrolls
 // it into view.
 func (st *State) SetSelections(sels ...Selection) {
+	st.setSelections(true, sels...)
+}
+
+func (st *State) SetSelectionsNoReveal(sels ...Selection) {
+	st.setSelections(false, sels...)
+}
+
+func (st *State) setSelections(reveal bool, sels ...Selection) {
 	st.ensure()
 	if len(sels) == 0 {
 		return
@@ -283,7 +291,11 @@ func (st *State) SetSelections(sels ...Selection) {
 	for i, s := range sels {
 		out[i] = st.ed.newSel(max(0, min(s.Anchor, n)), max(0, min(s.Head, n)))
 	}
-	st.ed.setSels(out, revealFit)
+	mode := revealNone
+	if reveal {
+		mode = revealFit
+	}
+	st.ed.setSels(out, mode)
 }
 
 // Select selects the text from start to end, a caret alone at end when
@@ -297,6 +309,11 @@ func (st *State) Cursor() int { return st.Selection().Head }
 func (st *State) CursorPos() Pos {
 	st.ensure()
 	return posOf(st.ed.view.text, st.ed.primary().head)
+}
+
+func (st *State) CaretRect() (ui.Rect, bool) {
+	st.ensure()
+	return st.ed.caretRect(st.ed.primary().head)
 }
 
 // SelectedText returns the text of the selections, joined by newlines.

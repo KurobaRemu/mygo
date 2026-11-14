@@ -23,8 +23,8 @@ func richTester(t *testing.T, doc *Document) (*ui.Tester, *bool) {
 			*changed = true
 		}
 	}, 500, 400)
-	tt.Press(250, 380)
-	tt.Release(250, 380)
+	tt.Press(250, 1)
+	tt.Release(250, 1)
 	tt.Key(ui.Cmd, ui.KeyDown)
 	return tt, changed
 }
@@ -594,10 +594,14 @@ func TestRichTextLinkOpensSafely(t *testing.T) {
 		Paragraph{Runs: []Run{{Text: "site", Attributes: Attributes{Link: "https://example.com"}}}},
 	))
 	tt, _ := richTester(t, doc)
+	mod := ui.Cmd
+	if runtime.GOOS != "darwin" {
+		mod = ui.Ctrl
+	}
 	for y := float32(2); y < 80; y += 6 { // apart, so that no click is a double click
 		tt.Move(10, y)
 		if tt.Cursor() == ui.CursorPointer {
-			tt.ClickAt(10, y)
+			tt.ClickAtWith(mod, 10, y)
 		}
 	}
 	got := tt.OpenedURLs()
@@ -1134,4 +1138,31 @@ func TestTallEditorInScroll(t *testing.T) {
 	if ink < 2000 {
 		t.Fatalf("scrolled down the text, the view shows no text (%d marked pixels)", ink)
 	}
+}
+
+func spansText(spans []ui.Span) string {
+	var b strings.Builder
+	for _, span := range spans {
+		b.WriteString(strings.ReplaceAll(span.Text, string(LineSeparator), "\n"))
+	}
+	return b.String()
+}
+
+func assertSource(t *testing.T, d *Document, want string) {
+	t.Helper()
+	if got := d.Source(); got != want {
+		t.Fatalf("source %q, want %q", got, want)
+	}
+	if err := d.CheckSource(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runeAtText(t *testing.T, d *Document, text string, offset int) int {
+	t.Helper()
+	i := strings.Index(d.Text().String(), text)
+	if i < 0 {
+		t.Fatalf("%q not in %q", text, d.Text().String())
+	}
+	return utf8.RuneCountInString(d.Text().String()[:i]) + offset
 }

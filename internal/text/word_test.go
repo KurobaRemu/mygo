@@ -34,6 +34,22 @@ func TestWordBoundary(t *testing.T) {
 	}
 }
 
+func TestFormatWordBoundary(t *testing.T) {
+	for _, c := range []struct {
+		a, b rune
+		want bool
+	}{
+		{'a', 'b', false}, {'a', '_', false}, {'9', 'x', false},
+		{'a', '中', true}, {'中', 'a', true}, {'中', '文', false},
+		{'か', 'な', false}, {'中', 'か', false}, {'か', 'ー', false},
+		{'a', ' ', true}, {'中', '，', true},
+	} {
+		if got := FormatWordBoundary(c.a, c.b); got != c.want {
+			t.Errorf("FormatWordBoundary(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
 // words walks s with next from 0 (and prev from its end) and returns the
 // offsets it stops at.
 func words(s string, step func(*Boundaries, int) int, from int) []int {

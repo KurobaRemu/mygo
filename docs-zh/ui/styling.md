@@ -13,8 +13,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   field.Radius(12).Background(t.Surface).
-  	Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.3)).
-  	InsetShadow(0, 0, 1, 0, ui.RGBA(255, 255, 255, 0.2))
+	Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.3)).
+	InsetShadow(0, 0, 1, 0, ui.RGBA(255, 255, 255, 0.2))
   ```
 
   `NoShadow()` 会移除之前添加的所有阴影，如 `box-shadow: none`，可用于去掉辅助函数返回的卡片自带的阴影；之后仍可重新添加阴影。[过渡](transitions.md#移动的是什么)会在阴影变化时以淡入淡出衔接。
@@ -22,8 +22,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   ui.Box(c).Size(240, 140).Radius(16).RadialGradient(ui.RadialGradient{
-  	Center: ui.Point{X: 0.3, Y: 0.2}, Oklab: true,
-  	Stops:  []ui.GradientStop{{ui.Hex("#a5b4fc"), 0}, {ui.Hex("#312e81"), 1}},
+	Center: ui.Point{X: 0.3, Y: 0.2}, Oklab: true,
+	Stops:  []ui.GradientStop{{ui.Hex("#a5b4fc"), 0}, {ui.Hex("#312e81"), 1}},
   })
   ```
 
@@ -32,7 +32,7 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
   ```go
   rainbow := []ui.GradientStop{{red, 0}, {yellow, 0.33}, {blue, 0.66}, {red, 1}}
   ui.Box(c).Size(120, 80).Radius(16).Border(4, ui.Color{}).
-  	BorderConicGradient(ui.ConicGradient{Stops: rainbow, Oklab: true})
+	BorderConicGradient(ui.ConicGradient{Stops: rainbow, Oklab: true})
   ```
 
   `Stripes(c, width, gap, angle)` 在背景上绘制条纹，比如用在不可用的内容上。绘制器用同样的渐变填充矩形和路径（`FillGradient`、`FillConicGradient`、`FillRadialGradient`、`FillPathGradient`、`FillPathConicGradient`、`StrokePathConicGradient`）。
@@ -47,8 +47,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   for _, l := range []struct{ width, blur float32 }{{6, 0}, {9, 4}, {15, 15}} {
-  	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().
-  		Radius(16).Border(l.width, ui.Color{}).BorderConicGradient(glow).Blur(l.blur)
+	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().
+		Radius(16).Border(l.width, ui.Color{}).BorderConicGradient(glow).Blur(l.blur)
   }
   ```
 - **裁剪到内缩区域。** `ClipInset(top, right, bottom, left, radius)` 按指定的 DIP 距离内缩盒子，并将元素及其全部内容（背景、阴影、边框、子元素）裁剪到该区域，如 CSS 的 `clip-path: inset()`。`ClipInsetPercent` 改用盒子尺寸的百分比。负的内缩量会向外扩展对应边，因此 `ClipInset(0, -40, 0, -40, 0)` 会裁剪上下两侧，同时保留左右两侧的阴影。内缩区域直接用场景裁剪实现，不生成图层，因此可以逐帧改变。为某一侧的内缩量添加动画，就能让元素以擦除式过渡逐渐显现：
@@ -56,7 +56,7 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
   ```go
   hidden := float32(100)
   if app.open {
-  	hidden = 0
+	hidden = 0
   }
   card.ClipInsetPercent(0, card.AnimateTo("wipe", hidden, ui.Smooth), 0, 0, 12)
   ```
@@ -77,8 +77,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
   black := ui.RGB(0, 0, 0)
   solid := ui.LinearGradient{From: black, To: black}
   ui.Box(c).Size(120, 40).Radius(20).Padding(1.5).Gradient(pink, violet, 90).Masks(
-  	ui.Mask{Image: solid, Box: ui.MaskContentBox, Composite: ui.MaskExclude},
-  	ui.Mask{Image: solid},
+	ui.Mask{Image: solid, Box: ui.MaskContentBox, Composite: ui.MaskExclude},
+	ui.Mask{Image: solid},
   )
   ```
 
@@ -86,8 +86,8 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   disc := func(x, y float32) ui.RadialGradient {
-  	return ui.RadialGradient{Center: ui.Point{X: x, Y: y}, Radius: 40,
-  		Stops: []ui.GradientStop{{black, 0.98}, {ui.Transparent, 1}}}
+	return ui.RadialGradient{Center: ui.Point{X: x, Y: y}, Radius: 40,
+		Stops: []ui.GradientStop{{black, 0.98}, {ui.Transparent, 1}}}
   }
   moon := ui.Box(c).Size(80, 80).Background(t.Text)
   moon.Masks(ui.Mask{Image: disc(0.5, 0.5), Composite: ui.MaskSubtract}, ui.Mask{Image: disc(0.7, 0.35)})
@@ -98,7 +98,7 @@ ui.Column(c).Padding(18).Gap(12).Radius(10).
 
   ```go
   ui.Box(c).Size(900, 212).Radius(16).Gradient(from, to, 30).
-  	Shadow(0, 10, 40, 0, shade).Cache().Children(func() { /* … */ })
+	Shadow(0, 10, 40, 0, shade).Cache().Children(func() { /* … */ })
   ```
 - **材质。** `Material(m)` 用包提供的材质填充盒子，代替背景，例如 [glass 插件](../plugins/glass.md) 的 Liquid Glass（透出下方内容，带磨砂效果和边缘折射）、滚动边缘效果，以及可沿渐变淡出的背景模糊。
 - **指针。** `Cursor` 使用各平台的指针形状：`CursorPointer`、`CursorText`、`CursorMove`、`CursorGrab` 和 `CursorGrabbing`、调整大小的光标（双向的，以及朝一侧的 `CursorResizeE`，还有列和行的）、用于拖放的 `CursorCopy` 和 `CursorAlias`、`CursorContextMenu`、`CursorVerticalText`、`CursorNotAllowed`、`CursorCrosshair`、`CursorNone`（隐藏指针）、CSS 的 `progress` 和 `wait`（`CursorProgress` 用于忙碌但仍接受输入的控件，如带有 `aria-busy` 的控件；`CursorWait` 用于什么也做不了的时候）、`CursorHelp`、`CursorCell`、`CursorZoomIn` 和 `CursorZoomOut`、`CursorAllScroll` 和 `CursorNoDrop`。Windows 没有缩放和单元格光标，MyGo 会自行绘制，就像浏览器自带这些光标一样；macOS 的 `CursorWait`、`CursorHelp`、缩放光标和 `CursorAllScroll` 属于 AppKit 的私有光标，WebKit 就是这样使用的；某个版本没有它们时，会显示最接近的公开光标（`CursorCell` 用十字准线）。元素的指针也会在其子元素上显示，但接收点击的子元素（按钮，或任何带有 `Clicked` 或 `OnClick` 的元素）除外：它们显示自己的指针，除非设置了其他指针，否则是默认箭头，因此带有 `CursorText` 的文本框中的按钮不会显示 I 形光标。
@@ -193,11 +193,11 @@ ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
   p := c.Preferences()
   size := float32(28)
   if p.Pointer == ui.PointerCoarse {
-  	size = 44
+	size = 44
   }
   del := ui.Button(c, "×").Size(size, size).Label("Delete")
   if p.Hover() {
-  	del.Tooltip("Delete")
+	del.Tooltip("Delete")
   }
   ```
 

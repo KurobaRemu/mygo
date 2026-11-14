@@ -279,7 +279,7 @@ func TestVisibleParagraphs(t *testing.T) {
 		if v == nil {
 			t.Fatal("no editor shows the document")
 		}
-		return v.boxes(nil)
+		return v.paragraphBoxes(nil)
 	}
 	height := float32(400)
 	check := func(what string) {

@@ -220,6 +220,17 @@ func (d *Document) Line(i, k int) (string, int) {
 	return line, int(s.start)
 }
 
+// LineIndent returns the indentation an indented code block consumed
+// before line k, which it keeps as the line's first column; "" for a
+// fenced block's line, which has none.
+func (d *Document) LineIndent(i, k int) string {
+	s := d.segs[int(d.blocks[i].segA)+k]
+	if s.indent <= 0 || s.indent > s.start {
+		return ""
+	}
+	return d.src[s.start-s.indent : s.start]
+}
+
 func (w *htmlWriter) inlines(i int) {
 	in := w.d.Inlines(i)
 	w.inline(in, 0, len(in))

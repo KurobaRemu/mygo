@@ -49,6 +49,14 @@ func (t *TextLayout) CaretAt(p TextCaretPosition) Rect {
 	return Rect{x, y, 1, h}
 }
 
+// VisualLine returns the index of the visual line that holds p, as CaretAt
+// places it: soft wraps and bidi breaks make more than one line per paragraph.
+func (t *TextLayout) VisualLine(p TextCaretPosition) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.l.VisualLine(t.position(p))
+}
+
 // PositionAt retains affinity while hit-testing whole graphemes.
 func (t *TextLayout) PositionAt(point Point) TextCaretPosition {
 	t.mu.Lock()

@@ -41,7 +41,8 @@ func (v *view) paint(p *ui.Painter, r ui.Rect) {
 		st := v.para(i).style
 		px, py := v.origin(i)
 		x, y := ox+px, oy+float32(py-v.scroll)
-		v.paintBlock(p, i, st, ox, top, pv.h, w)
+		bt := v.blockTop(i)
+		v.paintBlock(p, i, st, ox, top+bt, pv.h-bt, w)
 		pe := ps + v.para(i).n
 		if a != z && a <= pe && z >= ps && (focused || v.opts.ReadOnly) {
 			from, to := v.local(i, max(a, ps)), v.local(i, min(z, pe))
@@ -59,14 +60,14 @@ func (v *view) paint(p *ui.Painter, r ui.Rect) {
 		v.paintAttachments(p, i, pv, x, y)
 		v.paintMarker(p, i, st, pv, x, y)
 		if compose == i {
-			c := v.local(i, v.caret)
+			c := v.composeColumn(i, pv)
 			n := len([]rune(v.compose))
 			for _, s := range pv.layout.SelectionRects(ui.TextInputRange{Start: pv.units[c], End: pv.units[min(c+n, len(pv.units)-1)]}) {
 				p.Fill(ui.Rect{X: x + s.X, Y: y + s.Y + s.H - 2, W: s.W, H: 1}, look.Text, 0)
 			}
 		}
 	}
-	if focused && !v.opts.ReadOnly && a == z {
+	if focused && !v.opts.ReadOnly && v.lang == nil && a == z {
 		const blink = 530 * time.Millisecond
 		if phase := p.Now().Sub(v.blinkStart); (phase/blink)%2 == 0 || phase < 0 {
 			cx, cy, ch := v.caretAt(v.caret, v.composeCaret, v.affinity)
@@ -85,6 +86,18 @@ func (v *view) paint(p *ui.Painter, r ui.Rect) {
 	v.moved()
 }
 
+// composeColumn returns the display column of paragraph i's preedit. It is
+// where the display put the preedit, not where the source caret maps: inside
+// `[|]` the caret's source offset sits between two bytes of one verbatim
+// part, and the display draws the preedit between that part's runes (record
+// 2026-11-13, issue 178).
+func (v *view) composeColumn(i int, pv *paraView) int {
+	if pv.display != nil && pv.display.composeStart >= 0 {
+		return pv.display.composeStart
+	}
+	return v.local(i, v.caret)
+}
+
 // paintBlock paints what a paragraph of style st shows behind its text:
 // the background of a block of code, the bar of a quotation.
 func (v *view) paintBlock(p *ui.Painter, i int, st ParagraphStyle, x, top, height, width float32) {
@@ -94,8 +107,8 @@ func (v *view) paintBlock(p *ui.Painter, i int, st ParagraphStyle, x, top, heigh
 		// One block for the paragraphs of code next to each other, rounded
 		// at its ends.
 		radius := look.size * look.CodeBlockRadius
-		first := i == 0 || !v.para(i-1).style.CodeBlock
-		last := i+1 >= len(v.paras) || !v.para(i+1).style.CodeBlock
+		first := i == 0 || !v.para(i-1).style.CodeBlock || !v.sameBlock(i-1, i)
+		last := i+1 >= len(v.paras) || !v.para(i+1).style.CodeBlock || !v.sameBlock(i, i+1)
 		if first && v.opts.Space != nil {
 			// The room an app leaves above the block, as a place opened
 			// for an item dragged, is outside it.

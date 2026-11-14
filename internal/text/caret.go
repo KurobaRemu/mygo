@@ -114,6 +114,16 @@ func (l *Layout) caretLine(p CaretPosition) int {
 	return li
 }
 
+// VisualLine is the index of the visual line that holds p, the line CaretAt
+// places it on.
+func (l *Layout) VisualLine(p CaretPosition) int {
+	if len(l.Lines) == 0 {
+		return 0
+	}
+	p.Index = max(0, min(p.Index, len(l.Runes)))
+	return l.caretLine(p)
+}
+
 // CaretAt preserves affinity at bidi boundaries and soft line breaks.
 func (l *Layout) CaretAt(p CaretPosition) (x, y, h float32) {
 	if len(l.Lines) == 0 {

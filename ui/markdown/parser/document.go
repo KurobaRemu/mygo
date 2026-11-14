@@ -41,6 +41,31 @@ const (
 	// as #123, GH-123 and octocat/hello#123, in text outside code and
 	// links (Reference).
 	ExtReferences
+	ExtTyporaEmphasis
+	ExtDoubleTildeOnly
+	ExtFrontMatter
+	ExtNestedOrderedLists
+	// ExtTyporaContentSpace keeps the whitespace at the start of a
+	// paragraph, and after a block marker's one separator, as text. A list
+	// item's content indent stays at that one separator.
+	ExtTyporaContentSpace
+	// ExtTyporaEmptySetext reads a setext underline with no paragraph above
+	// it, only a blank line, as the underline of an empty heading, as
+	// Typora's editor does: `alpha\n=====\n\n\n=====` holds an empty
+	// level-1 heading on the last line (record 2026-11-10, seed9/c13).
+	ExtTyporaEmptySetext
+	// ExtTyporaEmptyStrong reads a paragraph's leading `****` followed by
+	// text as an empty strong element, its first two stars an opening run
+	// and its last two a closing one, as Typora does on reopen
+	// (record 2026-11-10, probe75/h, /k, /t, /u).
+	ExtTyporaEmptyStrong
+	// ExtTyporaCodeSpan closes a code span with the next run of backticks of
+	// any length when no run of its own length follows, as Typora reads a run
+	// of three backticks and a run of one: a one backtick span whose text is
+	// the opening run's other two backticks and what follows them.
+	// CommonMark closes a span only with a run of its opener's length
+	// (record 2026-11-12, seed18/c1, /c7).
+	ExtTyporaCodeSpan
 
 	// GFM is GitHub Flavored Markdown, as its spec has it.
 	GFM = ExtTables | ExtTaskLists | ExtStrikethrough | ExtAutolinks
@@ -49,6 +74,10 @@ const (
 	// of GitHub's comments. Mentions and references are text until a
 	// view resolves them.
 	Default = GFM | ExtFootnotes | ExtMath | ExtAlerts | ExtMentions | ExtReferences
+	// Typora is the M0 parser's extension set. Alerts, mentions and
+	// references stay out until the M6b Callout milestone changes the
+	// recorded Typora semantics.
+	Typora = GFM | ExtFootnotes | ExtTyporaEmphasis | ExtDoubleTildeOnly | ExtFrontMatter | ExtNestedOrderedLists | ExtTyporaContentSpace | ExtTyporaEmptySetext | ExtTyporaEmptyStrong | ExtTyporaCodeSpan
 )
 
 // Kind is what a block is.
@@ -61,6 +90,7 @@ const (
 	Paragraph
 	// Heading has a Level from 1 to 6.
 	Heading
+	FrontMatter
 	ThematicBreak
 	// CodeBlock is fenced or indented code, whose Info string names the
 	// language of a fence.
@@ -86,7 +116,7 @@ const (
 	MathBlock
 )
 
-var kindNames = [...]string{"root", "paragraph", "heading", "thematic break", "code block", "HTML block", "quote", "list", "item", "table", "table row", "table cell", "footnote definition", "math block"}
+var kindNames = [...]string{"root", "paragraph", "heading", "front matter", "thematic break", "code block", "HTML block", "quote", "list", "item", "table", "table row", "table cell", "footnote definition", "math block"}
 
 func (k Kind) String() string {
 	if int(k) < len(kindNames) {
@@ -182,7 +212,11 @@ type Block struct {
 	// Task is an item's check box.
 	Task Task
 	// Fenced tells a fenced code block from an indented one.
-	Fenced bool
+	Fenced        bool
+	FenceChar     byte
+	FenceLength   int
+	ContentIndent int
+	Setext        bool
 	// Header tells a table's header row.
 	Header bool
 	// Alert is the kind of a block quote that is a GitHub alert, its
@@ -220,7 +254,10 @@ type Block struct {
 type seg struct {
 	start, end int32
 	pad        int8
-	cell       bool // a table cell: no newline, and \| is |
+	// indent is how many bytes of indentation an indented code block took
+	// off this line, which it keeps as the line's first column.
+	indent int32
+	cell   bool // a table cell: no newline, and \| is |
 }
 
 // Info returns a fenced code block's info string, unescaped, its
@@ -262,6 +299,12 @@ func (b *Block) Healed() bool { return b.healed }
 
 // Document is Markdown parsed, which takes text appended to it, or edits,
 // and parses only what they change.
+// LiteralLine is a line whose block markers after any container prefixes
+// are literal: Line is the line's start, Content where its content starts.
+type LiteralLine struct {
+	Line, Content int
+}
+
 type Document struct {
 	src string
 	// buf holds the source as text is appended: its bytes before the
@@ -286,6 +329,20 @@ type Document struct {
 	// SetStreaming), and tail is the block holding the end.
 	streaming bool
 	tail      int
+	// literals are the lines whose block markers after any existing
+	// container prefixes are literal while they are being typed. A line
+	// stays literal after the caret leaves it: the markers were typed as
+	// text, and a later parse of the same bytes alone would turn them into
+	// blocks. LiteralLine.Content is the source offset where the line's
+	// content starts, so markers belonging to its quote/list containers
+	// still parse.
+	literals []LiteralLine
+	// lives are the offsets of the line breaks this session typed: a
+	// break stays live while the paragraph it opens still starts on it.
+	// The bytes alone do not say who typed them: a break the session
+	// typed, as the one Shift+Enter writes, shows on the paragraph's
+	// first line, while the same bytes reopened from a file do not.
+	lives []int
 	// cut is where the source parsed for display ends: text held back
 	// while streaming lies past it.
 	cut int
@@ -303,7 +360,9 @@ type Document struct {
 	// Tests check that it grows linearly with the source.
 	steps int
 	// marks is the buffer of the last sourceMap.
-	marks []int
+	marks              []int
+	relinks            uint32
+	reAt, reFrom, reTo int
 }
 
 type oldInline struct {
@@ -376,6 +435,10 @@ func (d *Document) Footnote(label string) (int, bool) {
 // Extensions returns what the document reads beyond CommonMark.
 func (d *Document) Extensions() Extensions { return d.ext }
 
+func (d *Document) Relinks() uint32 { return d.relinks }
+
+func (d *Document) Reparsed() (at, from, to int) { return d.reAt, d.reFrom, d.reTo }
+
 // Len returns the number of blocks, the root's included.
 func (d *Document) Len() int { return len(d.blocks) }
 
@@ -417,6 +480,186 @@ func (d *Document) SetStreaming(on bool) {
 	}
 	d.streaming = on
 	d.parseTail()
+}
+
+// SetLiteralLine keeps block markers at contentStart on the line at
+// lineStart literal for the rest of the document's life, until the line
+// is cleared. Container prefixes before contentStart still parse.
+func (d *Document) SetLiteralLine(lineStart, contentStart int) {
+	for i := range d.literals {
+		if d.literals[i].Line == lineStart {
+			d.literals[i].Content = contentStart
+			return
+		}
+	}
+	d.literals = append(d.literals, LiteralLine{Line: lineStart, Content: contentStart})
+	slices.SortFunc(d.literals, func(a, b LiteralLine) int { return a.Line - b.Line })
+}
+
+// ClearLiteralLineAt lets block markers at the start of the line at
+// lineStart parse as usual again.
+func (d *Document) ClearLiteralLineAt(lineStart int) {
+	for i := range d.literals {
+		if d.literals[i].Line == lineStart {
+			d.literals = slices.Delete(d.literals, i, i+1)
+			return
+		}
+	}
+}
+
+// LiteralLines returns the document's literal lines.
+func (d *Document) LiteralLines() []LiteralLine {
+	return append([]LiteralLine(nil), d.literals...)
+}
+
+// SetLiteralLines replaces the document's literal lines. It seeds a parser
+// that has not read any source yet, and restores them around an undo.
+func (d *Document) SetLiteralLines(lines []LiteralLine) {
+	d.literals = append(d.literals[:0], lines...)
+	slices.SortFunc(d.literals, func(a, b LiteralLine) int { return a.Line - b.Line })
+}
+
+// isLiteralLine reports whether the line at lineStart with content at
+// contentStart is literal.
+func (d *Document) isLiteralLine(lineStart, contentStart int) bool {
+	i, ok := slices.BinarySearchFunc(d.literals, lineStart, func(l LiteralLine, line int) int { return l.Line - line })
+	return ok && d.literals[i].Content == contentStart
+}
+
+// SetLiveLine keeps the line break at breakAt as one this session typed,
+// for the rest of the document's life, until the break is cleared.
+func (d *Document) SetLiveLine(breakAt int) {
+	i, ok := d.liveIndex(breakAt)
+	if ok {
+		return
+	}
+	d.lives = slices.Insert(d.lives, i, breakAt)
+}
+
+// ClearLiveLineAt drops the break at breakAt from the session's breaks.
+func (d *Document) ClearLiveLineAt(breakAt int) {
+	if i, ok := d.liveIndex(breakAt); ok {
+		d.lives = slices.Delete(d.lives, i, i+1)
+	}
+}
+
+// LiveLines returns the line breaks the session typed.
+func (d *Document) LiveLines() []int {
+	return append([]int(nil), d.lives...)
+}
+
+// SetLiveLines replaces the line breaks the session typed. It seeds a
+// parser that has not read any source yet, and restores them around an
+// undo.
+func (d *Document) SetLiveLines(lines []int) {
+	d.lives = append(d.lives[:0], lines...)
+	slices.Sort(d.lives)
+	d.lives = slices.Compact(d.lives)
+}
+
+// IsLiveLine reports whether the line break at breakAt is one the
+// session typed.
+func (d *Document) IsLiveLine(breakAt int) bool {
+	_, ok := d.liveIndex(breakAt)
+	return ok
+}
+
+func (d *Document) liveIndex(breakAt int) (int, bool) {
+	return slices.BinarySearch(d.lives, breakAt)
+}
+
+// shiftLiteralLines moves the literal lines over an edit replacing
+// [from, to) with delta more bytes. A line whose start the edit replaces
+// is no longer a line; the caller sets the line it is typing again.
+func (d *Document) shiftLiteralLines(from, to, delta int) {
+	d.literals = ShiftLiteralLines(d.literals, from, to, delta)
+}
+
+// shiftLiveLines moves the session's line breaks over an edit replacing
+// [from, to) with delta more bytes. A break the edit replaces is no
+// longer a line break.
+func (d *Document) shiftLiveLines(from, to, delta int) {
+	d.lives = ShiftLiveLines(d.lives, from, to, delta)
+}
+
+// ShiftLiteralLines maps literal lines over an edit replacing [from, to)
+// with delta more bytes. A line whose start the edit replaces is dropped.
+func ShiftLiteralLines(lines []LiteralLine, from, to, delta int) []LiteralLine {
+	if len(lines) == 0 {
+		return lines
+	}
+	out := lines[:0]
+	for _, l := range lines {
+		line, ok := MapLiteralOffset(l.Line, from, to, delta)
+		if !ok {
+			continue
+		}
+		content, ok := MapLiteralOffset(l.Content, from, to, delta)
+		if !ok || content < line {
+			continue
+		}
+		out = append(out, LiteralLine{Line: line, Content: content})
+	}
+	return out
+}
+
+// ShiftLiveLines maps the session's line breaks over an edit replacing
+// [from, to) with delta more bytes. A break the edit replaces is dropped.
+func ShiftLiveLines(lines []int, from, to, delta int) []int {
+	if len(lines) == 0 {
+		return lines
+	}
+	out := lines[:0]
+	for _, at := range lines {
+		if mapped, ok := MapLiveOffset(at, from, to, delta); ok {
+			out = append(out, mapped)
+		}
+	}
+	return out
+}
+
+// MapLiveOffset maps a line break's offset over an edit replacing [from, to)
+// with delta more bytes. A break names the line ending's first byte, so
+// bytes inserted at its offset join the line before it and push the break
+// along: unlike a literal line's start, the break at p moves when text is
+// inserted at p.
+func MapLiveOffset(p, from, to, delta int) (int, bool) {
+	if from == to {
+		if p < from {
+			return p, true
+		}
+		return p + delta, true
+	}
+	switch {
+	case p < from:
+		return p, true
+	case p >= to:
+		return p + delta, true
+	default:
+		return 0, false
+	}
+}
+
+// MapLiteralOffset maps offset p over an edit replacing [from, to) with
+// delta more bytes. An insertion at p stays in front of it, as a line's
+// start stays the line's start when text is typed there.
+func MapLiteralOffset(p, from, to, delta int) (int, bool) {
+	if from == to {
+		// An insertion at a line's start stays before it, and one at its
+		// content start stays in front of the content.
+		if p > from {
+			return p + delta, true
+		}
+		return p, true
+	}
+	switch {
+	case p < from:
+		return p, true
+	case p >= to:
+		return p + delta, true
+	default:
+		return 0, false
+	}
 }
 
 // Set makes src the text of the document, parsing only what changed

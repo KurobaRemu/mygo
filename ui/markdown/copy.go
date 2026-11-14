@@ -396,8 +396,7 @@ func (st *viewState) closeSyntax(in []parser.Inline, k int) string {
 			return src[end:n.End]
 		}
 	case parser.Code:
-		ticks := codeStart(src, n) - n.Start
-		return src[n.End-ticks : n.End]
+		return src[n.End-parser.CodeFence(src, n) : n.End]
 	}
 	return ""
 }

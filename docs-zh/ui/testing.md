@@ -38,7 +38,7 @@ func TestCounter(t *testing.T) {
   tt.Advance(100 * time.Millisecond) // half way through a 200 ms animation
   tt.Advance(time.Second)            // and done
   if tt.FramePending() {
-  	t.Error("the panel keeps asking for frames")
+	t.Error("the panel keeps asking for frames")
   }
   ```
 

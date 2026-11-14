@@ -47,20 +47,20 @@ ui.Overlay(c, func() {
 
   ```go
   tip := ui.Column(c).AttachTo(b, ui.AnchorBottom, ui.AnchorTop).Margin(6, 0, 0, 0).
-  	AttachedOrigin().Transition(ui.ElementTransition{
-  		Duration: 150 * time.Millisecond, ExitDuration: 100 * time.Millisecond,
-  		Enter: &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
-  		Exit:  &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
-  	})
+	AttachedOrigin().Transition(ui.ElementTransition{
+		Duration: 150 * time.Millisecond, ExitDuration: 100 * time.Millisecond,
+		Enter: &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
+		Exit:  &ui.Motion{Scale: 0.96, Y: -4, Flip: true},
+	})
   _, self := tip.AttachedAnchors()
   tip.AlignItems(ui.Center).Children(func() {
-  	if self == ui.AnchorTop { // below the button, as asked
-  		ui.Text(c, "▲")
-  	}
-  	ui.Text(c, "Copied")
-  	if self == ui.AnchorBottom { // above it, without room below
-  		ui.Text(c, "▼")
-  	}
+	if self == ui.AnchorTop { // below the button, as asked
+		ui.Text(c, "▲")
+	}
+	ui.Text(c, "Copied")
+	if self == ui.AnchorBottom { // above it, without room below
+		ui.Text(c, "▼")
+	}
   })
   ```
 - `PressedOutside` 报告在元素、它的目标以及其中内容所开的浮层之外发生的按下，浮层据此关闭；`PressedInside` 报告它们之内的一次按下，而不接收指针。元素显示之前的按下不算在它的外部：右键单击打开的浮层会保持打开，因为这次按下在同一帧打开了它。

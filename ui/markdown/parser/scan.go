@@ -6,9 +6,14 @@ import (
 	"unicode/utf8"
 )
 
-// scanATXStart returns the length of an ATX heading's opening sequence
-// at i with the spaces after it, or 0.
-func scanATXStart(ln string, i int) int {
+// scanATXStart returns the length of an ATX heading's opening sequence at i,
+// including the separator space, or 0. A heading always needs a space or tab
+// after its hashes. Typora reads a line that ends at the hashes as a
+// paragraph with a visible hash prefix, not an empty heading (record
+// 2026-11-11, seed10/c18); strict profiles keep CommonMark's empty heading.
+// Typora keeps the whitespace after that one separator as content, so it
+// consumes exactly one separator where CommonMark consumes the whole run.
+func scanATXStart(ln string, i int, typora bool) int {
 	j := i
 	for j < len(ln) && ln[j] == '#' && j-i < 7 {
 		j++
@@ -18,16 +23,30 @@ func scanATXStart(ln string, i int) int {
 		return 0
 	}
 	if j == len(ln) {
+		if typora {
+			return 0
+		}
 		return n
 	}
 	if !isSpaceOrTab(ln[j]) {
 		return 0
+	}
+	if typora {
+		// addHeadingText consumes the one separator after positioning the
+		// heading, so the opening sequence ends at the hashes here.
+		return n
 	}
 	for j < len(ln) && isSpaceOrTab(ln[j]) {
 		j++
 	}
 	return j - i
 }
+
+// OpenFenceLength returns the length of the opening code fence at i in ln,
+// or 0. An inline command that would write a delimiter in front of such a
+// run asks it: Typora reads the line as a fenced code block and writes
+// nothing (record 2026-11-12, probe124b/tick3-i).
+func OpenFenceLength(ln string, i int) int { return scanOpenFence(ln, i) }
 
 // scanOpenFence returns the length of an opening code fence at i, or 0.
 func scanOpenFence(ln string, i int) int {

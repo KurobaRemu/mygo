@@ -248,6 +248,9 @@ func (ed *editor) run(cmd Command) bool {
 		if ed.completing() {
 			return ed.acceptCompletion()
 		}
+		if ed.markdownNewline() {
+			return true
+		}
 		return ed.newline()
 	case NewlineAbove, NewlineBelow:
 		return ed.newlineAround(cmd == NewlineAbove)
@@ -273,6 +276,9 @@ func (ed *editor) run(cmd Command) bool {
 		if cmd == Backtab && ed.stepSnippet(true) {
 			return true
 		}
+		if cmd == Backtab && ed.markdownOutdent() {
+			return true
+		}
 		return ed.indentLines(-1)
 	case Tab:
 		if ed.completing() {
@@ -282,6 +288,9 @@ func (ed *editor) run(cmd Command) bool {
 			return true
 		}
 		if ed.acceptSuggestion() {
+			return true
+		}
+		if ed.markdownTab() {
 			return true
 		}
 		return ed.tab()
