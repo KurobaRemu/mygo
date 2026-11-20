@@ -11,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
 func TestCoreTextSyntheticItalic(t *testing.T) {
@@ -523,7 +526,7 @@ func TestCoreTextWrapFuzz(t *testing.T) {
 			}
 			wrapped++
 			e.u16, e.index = appendUTF16(e.u16[:0], e.index[:0], text)
-			want := e.typesetLines(typesetter, len(e.u16), width, nil, false, false, e.index, style.Italic)
+			want := e.typesetLines(typesetter, 0, len(e.u16), width, nil, false, false, e.index, style.Italic)
 			if !sameLines(got, want) {
 				report(t, text, style, width, got, want)
 				return
@@ -555,4 +558,136 @@ func report(t *testing.T, text []rune, style Style, width float32, got, want []s
 		}
 	}
 	t.Fatalf("in %+v at %v, %d lines, Core Text's %d", style, width, len(got), len(want))
+}
+
+// TestCoreTextWindowedTypeset holds lines broken over bounded
+// typesetters to those of one typesetter over the whole paragraph that
+// allows unbounded layout, which lays out a long text as a short one: Core
+// Text's own lays out a paragraph past typesetterLimit otherwise. Only
+// right-to-left text keeps the whole paragraph's typesetter, and its
+// cases stay within typesetterLimit.
+func TestCoreTextWindowedTypeset(t *testing.T) {
+	oldThreshold := windowThreshold
+	defer func() { windowThreshold = oldThreshold }()
+	repeat := func(s string, n int) []rune {
+		r := []rune(s)
+		return []rune(strings.Repeat(s, (n+len(r)-1)/len(r)))[:n]
+	}
+	english := "The quick brown fox jumps over the lazy dog, while 42 typists in 1987 wrote flowing prose about kerning, ligatures (fi, fl, ffi) and office affairs. "
+	chinese := "长途综合对比卡片需要在一个超长段落里排版，中文没有空格，标点“如此”，数字123和English混排。"
+	mixed := english + chinese + "emoji 😀👍🏽 e\u0301 — “quotes” 1,234.56 "
+	// rich styles runs of the text in turn bold, italic, monospaced and
+	// plain, as a Markdown paragraph's.
+	rich := func(n int) []Span {
+		looks := []Span{{Weight: 700}, {Italic: true}, {Family: "Menlo"}, {}}
+		var spans []Span
+		for end, i := 23, 0; end < n+23; end, i = end+23, i+1 {
+			sp := looks[i%len(looks)]
+			sp.End = min(end, n)
+			spans = append(spans, sp)
+		}
+		return spans
+	}
+	cases := []struct {
+		name       string
+		text       []rune
+		style      Style
+		spans      []Span
+		window     int
+		width      float32
+		windowed   bool
+		wholeWords bool
+	}{
+		{"english", repeat(english, 14000), Style{Size: 14}, nil, 4096, 400, true, false},
+		{"english_small_window", repeat(english, 14000), Style{Size: 14}, nil, 128, 250, true, false},
+		{"chinese", repeat(chinese, 14000), Style{Size: 14}, nil, 4096, 400, true, false},
+		{"chinese_small_window", repeat(chinese, 14000), Style{Size: 14}, nil, 128, 300, true, false},
+		{"narrow", repeat(mixed, 14000), Style{Size: 14}, nil, 4096, 120, true, false},
+		{"bold", repeat(mixed, 14000), Style{Size: 14, Weight: 700}, nil, 4096, 400, true, false},
+		{"italic", repeat(mixed, 14000), Style{Size: 14, Italic: true}, nil, 4096, 400, true, false},
+		{"family", repeat(mixed, 14000), Style{Size: 15, Family: "Georgia"}, nil, 4096, 400, true, false},
+		{"lang", repeat(mixed, 14000), Style{Size: 13, Lang: "zh-Hans"}, nil, 4096, 400, true, false},
+		{"spacing", repeat(mixed, 14000), Style{Size: 14, LetterSpacing: 0.5}, nil, 4096, 400, true, false},
+		{"rich", repeat(mixed, 14000), Style{Size: 14}, rich(14000), 4096, 400, true, false},
+		{"rich_small_window", repeat(mixed, 14000), Style{Size: 14}, rich(14000), 128, 300, true, false},
+		{"long_token", append([]rune(strings.Repeat("x", 5000)), repeat(english, 9000)...), Style{Size: 14}, nil, 128, 250, true, false},
+		{"attachments", repeat("a\ufffc b ", 12000), Style{Size: 14}, []Span{{End: 1 << 30, ObjectWidth: 28, ObjectHeight: 20}}, 128, 350, true, false},
+		{"tabs", repeat("a\tb c ", 12000), Style{Size: 14, TabSize: 8, tabStop: 30}, nil, 128, 350, true, false},
+		{"emoji", repeat("a😀e\u0301 b ", 12000), Style{Size: 14}, nil, 128, 350, true, false},
+		{"whole_words", repeat("verylongwordthatwillnotfitanywhere and words ", 12000), Style{Size: 14}, nil, 128, 250, true, true},
+		{"keep_words", repeat("한국어 단어가 줄을 넘지 않도록 ", 12000), Style{Size: 14, Lang: "ko"}, nil, 128, 250, true, false},
+		{"breaks", repeat("hy\u00adphenated words and lines ", 12000), Style{Size: 14}, nil, 128, 250, true, false},
+		{"rtl", append(repeat("plain prefix ", 1000), repeat("مرحبا بالعالم ", 4000)...), Style{Size: 14}, nil, 128, 300, false, false},
+		{"bidi_control", append(repeat(english, 6000), []rune("\u202E")...), Style{Size: 14}, nil, 128, 300, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			windowThreshold = 1 << 30
+			want := shapedWithWindows(t, c.text, c.style, c.spans, c.width, c.wholeWords, true)
+			windowThreshold = c.window
+			got := shapedWithWindows(t, c.text, c.style, c.spans, c.width, c.wholeWords, false)
+			if !sameShape(want, got) {
+				t.Fatalf("%d lines shaped over windows differ from %d lines shaped whole", len(got), len(want))
+			}
+			if windowEligible(c.text, false) != c.windowed {
+				t.Fatalf("windowed %v, want %v", !c.windowed, c.windowed)
+			}
+		})
+	}
+}
+
+// shapedWithWindows shapes text with a fresh engine, whose window
+// threshold the test sets, and copies its lines out of its scratch. Its
+// typesetters allow unbounded layout when unbounded.
+func shapedWithWindows(t *testing.T, text []rune, style Style, spans []Span, width float32, wholeWords, unbounded bool) []shapedLine {
+	t.Helper()
+	s := newSystem()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.engine().(*coreText)
+	e.resetScratch()
+	if unbounded {
+		defer unboundedTypesetters(t)()
+	}
+	lines := e.shape(text, style, spans, width, false, wholeWords)
+	out := make([]shapedLine, len(lines))
+	for i := range lines {
+		out[i] = cloneLine(lines[i])
+	}
+	return out
+}
+
+// unboundedTypesetters has the typesetters made until the returned func
+// is called allow unbounded layout.
+func unboundedTypesetters(t *testing.T) func() {
+	t.Helper()
+	text, err := purego.Dlopen("/System/Library/Frameworks/CoreText.framework/CoreText", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	create, err := purego.Dlsym(text, "CTTypesetterCreateWithAttributedStringAndOptions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := func(lib uintptr, name string) uintptr {
+		p, err := purego.Dlsym(lib, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return **(**uintptr)(unsafe.Pointer(&p))
+	}
+	options := cfDictionary([]uintptr{value(text, "kCTTypesetterOptionAllowUnboundedLayout")}, []uintptr{value(cf, "kCFBooleanTrue")})
+	own := ct.typesetterCreate
+	ct.typesetterCreate = func(str uintptr) uintptr {
+		r, _, _ := purego.SyscallN(create, str, options)
+		return r
+	}
+	return func() {
+		ct.typesetterCreate = own
+		ct.release(options)
+	}
 }

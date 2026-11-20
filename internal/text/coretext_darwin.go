@@ -439,6 +439,12 @@ type coreText struct {
 	// seg and breaks find where lines may break (lineBreaks).
 	seg    segmenter.Segmenter
 	breaks []bool
+	// windowSeg finds safe ends for the windows of a long paragraph, and
+	// windowAt and windowIndex hold the code unit of each of its runes and
+	// the rune of each code unit of a window (typesetWindowed).
+	windowSeg   segmenter.Segmenter
+	windowAt    []int
+	windowIndex []int
 
 	// Buffers shape reuses: the text in UTF-16 with the rune of each code
 	// unit, the attributes of the string, the code unit of each rune, and
@@ -994,14 +1000,24 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 	if font == 0 || len(text) == 0 {
 		return nil
 	}
+	lang := style.Lang
+	if ct.languageName == 0 || !languageShapes(text, lang) {
+		lang = ""
+	}
+	e.u16, e.index = appendUTF16(e.u16[:0], e.index[:0], text)
+	u16, index := e.u16, e.index
+	n := len(u16)
+	if width > 0 && n > windowThreshold && windowEligible(text, rtl) {
+		if lines, ok := e.typesetWindowed(font, u16, index, text, style, spans, width, wholeWords, lang); ok {
+			return lines
+		}
+	}
+	// A typesetter over the whole paragraph, kept for another width or
+	// shaped once, finds its own breaks below.
 	if len(spans) > 0 {
 		// After the typesetter and its lines are released, deferred
 		// below.
 		defer e.delegates.done()
-	}
-	lang := style.Lang
-	if ct.languageName == 0 || !languageShapes(text, lang) {
-		lang = ""
 	}
 	// A typesetter holds the shaping of its text, whatever the width, so a
 	// text wrapped again at another width needs only new line breaks.
@@ -1024,7 +1040,6 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 		}
 	}
 	if kept == nil {
-		e.u16, e.index = appendUTF16(e.u16[:0], e.index[:0], text)
 		typesetter = e.newTypesetter(font, e.u16, text, style, spans, rtl, lang)
 		if typesetter == 0 {
 			return nil
@@ -1042,30 +1057,177 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 			return lines
 		}
 	}
-	e.u16, e.index = appendUTF16(e.u16[:0], e.index[:0], text)
-	u16, index := e.u16, e.index
-	n := len(u16)
 	var breaks []bool
 	keepWords := false
-	if width > 0 && (wholeWords || keepsAnyWords(style.Lang, spans)) {
-		e.breaks = lineBreaks(&e.seg, e.breaks, text)
-		keepWords = keepWordsWhole(e.breaks, text, style.Lang, spans)
-		if wholeWords || keepWords {
-			breaks = e.breaks
-		}
+	if width > 0 {
+		breaks, keepWords = e.wordBreaks(text, style, spans, wholeWords)
 	}
-	return e.typesetLines(typesetter, n, width, breaks, wholeWords, keepWords, index, style.Italic)
+	return e.typesetLines(typesetter, 0, n, width, breaks, wholeWords, keepWords, index, style.Italic)
 }
 
-// typesetLines has Core Text break a typesetter's text of n UTF-16 units into
-// lines, and shape them. Where Core Text breaks a line elsewhere than at one
-// of breaks, when given, the line goes back to the last of them in it when
-// keepWords (keepWordsWhole), or carries on to the next of them when
-// wholeWords and there is none to go back to.
-func (e *coreText) typesetLines(typesetter uintptr, n int, width float32, breaks []bool, wholeWords, keepWords bool, index []int, italic bool) []shapedLine {
+// wordBreaks returns where the lines of text may break, when Core Text's
+// own breaks are not all taken: when words are kept whole, by wholeWords
+// or by the language of the text or of a span (keepWords).
+func (e *coreText) wordBreaks(text []rune, style Style, spans []Span, wholeWords bool) (breaks []bool, keepWords bool) {
+	if !wholeWords && !keepsAnyWords(style.Lang, spans) {
+		return nil, false
+	}
+	e.breaks = lineBreaks(&e.seg, e.breaks, text)
+	keepWords = keepWordsWhole(e.breaks, text, style.Lang, spans)
+	if wholeWords || keepWords {
+		breaks = e.breaks
+	}
+	return breaks, keepWords
+}
+
+// windowEligible reports whether a long paragraph may be broken over
+// bounded typesetters. Core Text shapes a line from the text around it,
+// which a window holds, but resolves the direction of runes over the
+// whole paragraph: right-to-left letters and directional controls keep it
+// whole.
+func windowEligible(text []rune, rtl bool) bool {
+	if rtl {
+		return false
+	}
+	for _, r := range text {
+		if r >= 0x0590 && unicode.In(r, unicode.Hebrew, unicode.Arabic, unicode.Syriac, unicode.Thaana, unicode.Nko, unicode.Samaritan, unicode.Mandaic, unicode.Adlam, unicode.Bidi_Control) {
+			return false
+		}
+	}
+	return true
+}
+
+// windowThreshold is the length in UTF-16 units at which a paragraph
+// takes bounded typesetters, and the room each of them sees past the
+// line it starts at.
+var windowThreshold = 4096
+
+// typesetterLimit is the longest text, in UTF-16 units, that a typesetter
+// lays out as it lays out a short one. Over a longer text Core Text, but
+// for kCTTypesetterOptionAllowUnboundedLayout, positions glyphs and
+// breaks lines otherwise: from 10241 units, in every font tried on macOS
+// 26. A window stays within it.
+const typesetterLimit = 10240
+
+// typesetWindowed breaks a long left-to-right paragraph over bounded
+// typesetters, or reports that a line is too long for them. A window
+// starts at the last line kept from the one before, so its first line is
+// shaped after the text before it, as the space between Han characters
+// and a Latin word that starts a line is. Its last line is left out: it
+// may be short only because its text ends there, and the next window
+// breaks it again, so every line kept has the text after it too.
+func (e *coreText) typesetWindowed(font uintptr, u16 []uint16, index []int, text []rune, style Style, spans []Span, width float32, wholeWords bool, lang string) ([]shapedLine, bool) {
+	at := slices.Grow(e.windowAt[:0], len(text)+1)[:len(text)+1]
+	e.windowAt = at
+	at[0] = 0
+	for i, r := range text {
+		at[i+1] = at[i] + 1
+		if r >= 0x10000 {
+			at[i+1]++
+		}
+	}
+	breaks, keepWords := e.wordBreaks(text, style, spans, wholeWords)
+	var lines []shapedLine
+	// The window's typesetter holds the text from before, at the start
+	// of the line kept last, and shapes lines from start on.
+	before := 0
+	for start, size := 0, windowThreshold; start < len(u16); {
+		end := min(start+size, len(u16))
+		if end-before > typesetterLimit {
+			return nil, false
+		}
+		boundary := end
+		if end < len(u16) {
+			boundary = e.windowEnd(text, index, at, start, end)
+		}
+		from, to := index[before], index[end]
+		winIndex := append(e.windowIndex[:0], index[before:end+1]...)
+		e.windowIndex = winIndex
+		for i := range winIndex {
+			winIndex[i] -= from
+		}
+		winSpans := spansIn(spans, from, to)
+		typesetter := e.newTypesetter(font, u16[before:end], text[from:to], style, winSpans, false, lang)
+		if typesetter == 0 {
+			return nil, false
+		}
+		var winBreaks []bool
+		if breaks != nil {
+			winBreaks = breaks[from:]
+		}
+		winLines := e.typesetLines(typesetter, start-before, boundary-before, width, winBreaks, wholeWords, keepWords, winIndex[:boundary-before+1], style.Italic)
+		ct.release(typesetter)
+		if len(winSpans) > 0 {
+			e.delegates.done()
+		}
+		if boundary < len(u16) {
+			if len(winLines) < 2 {
+				// One line took the window: give it room to end where
+				// Core Text ends it, rather than at the window's edge.
+				size *= 2
+				continue
+			}
+			winLines = winLines[:len(winLines)-1]
+			size = windowThreshold
+		}
+		for _, l := range winLines {
+			lines = append(lines, cloneShapedLine(l))
+		}
+		offsetLines(lines[len(lines)-len(winLines):], from)
+		last := lines[len(lines)-1]
+		before, start = at[last.start], at[last.end]
+	}
+	return lines, len(lines) > 0
+}
+
+// cloneShapedLine copies a line out of the engine's scratch, so the
+// scratch of the next window cannot overwrite its runs and glyphs.
+func cloneShapedLine(l shapedLine) shapedLine {
+	l.runs = slices.Clone(l.runs)
+	for i := range l.runs {
+		l.runs[i].glyphs = slices.Clone(l.runs[i].glyphs)
+	}
+	return l
+}
+
+// windowEnd moves the end of a window to a grapheme cluster and line
+// break boundary, so no word, cluster or span is split by a window.
+func (e *coreText) windowEnd(text []rune, index, at []int, start, end int) int {
+	from, to := index[start], index[end]
+	e.windowSeg.Init(text[from:to])
+	line := 0
+	for it := e.windowSeg.LineIterator(); it.Next(); {
+		l := it.Line()
+		if unit := at[from+l.Offset+len(l.Text)]; unit > start && unit < end {
+			line = unit
+		}
+	}
+	cluster := 0
+	for it := e.windowSeg.GraphemeIterator(); it.Next(); {
+		g := it.Grapheme()
+		if unit := at[from+g.Offset]; unit > start && unit < end {
+			cluster = unit
+		}
+	}
+	boundary := end
+	if line > start {
+		boundary = line
+	}
+	if cluster > start {
+		boundary = min(boundary, cluster)
+	}
+	return max(boundary, start+1)
+}
+
+// typesetLines has Core Text break a typesetter's text, from UTF-16 unit
+// start to n, into lines, and shape them. Where Core Text breaks a line
+// elsewhere than at one of breaks, when given, the line goes back to the
+// last of them in it when keepWords (keepWordsWhole), or carries on to the
+// next of them when wholeWords and there is none to go back to.
+func (e *coreText) typesetLines(typesetter uintptr, start, n int, width float32, breaks []bool, wholeWords, keepWords bool, index []int, italic bool) []shapedLine {
 	var lines []shapedLine
 	mark := len(e.shapeScratch.lines)
-	for start := 0; start < n; {
+	for start < n {
 		count := n - start
 		if width > 0 {
 			// A width measured by Layout sums advances in float32, which
