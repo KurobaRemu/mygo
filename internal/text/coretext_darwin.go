@@ -134,18 +134,23 @@ var ct struct {
 	fontDrawGlyphs        func(font uintptr, glyphs *uint16, positions *cgPoint, n int, context uintptr)
 	paragraphStyleCreate  func(settings *ctParagraphStyleSetting, n int) uintptr
 	typesetterCreate      func(str uintptr) uintptr
-	suggestLineBreak      func(typesetter uintptr, start int, width float64) int
-	typesetterCreateLine  func(typesetter uintptr, r cfRange) uintptr
-	lineGetGlyphRuns      func(line uintptr) uintptr
-	lineGetStringRange    func(line uintptr) cfRange
-	runGetGlyphCount      func(run uintptr) int
-	runGetStringRange     func(run uintptr) cfRange
-	runGetStatus          func(run uintptr) uint32
-	runGetAttributes      func(run uintptr) uintptr
-	runGetGlyphs          func(run uintptr, r cfRange, out *uint16)
-	runGetPositions       func(run uintptr, r cfRange, out *cgPoint)
-	runGetAdvances        func(run uintptr, r cfRange, out *cgSize)
-	runGetStringIndices   func(run uintptr, r cfRange, out *int)
+	// typesetterCreateWith creates a typesetter with options, and
+	// unbounded are the options that lay out a text past typesetterLimit
+	// as a short one (newTypesetter); 0 where Core Text has none.
+	typesetterCreateWith uintptr
+	unbounded            uintptr
+	suggestLineBreak     func(typesetter uintptr, start int, width float64) int
+	typesetterCreateLine func(typesetter uintptr, r cfRange) uintptr
+	lineGetGlyphRuns     func(line uintptr) uintptr
+	lineGetStringRange   func(line uintptr) cfRange
+	runGetGlyphCount     func(run uintptr) int
+	runGetStringRange    func(run uintptr) cfRange
+	runGetStatus         func(run uintptr) uint32
+	runGetAttributes     func(run uintptr) uintptr
+	runGetGlyphs         func(run uintptr, r cfRange, out *uint16)
+	runGetPositions      func(run uintptr, r cfRange, out *cgPoint)
+	runGetAdvances       func(run uintptr, r cfRange, out *cgSize)
+	runGetStringIndices  func(run uintptr, r cfRange, out *int)
 
 	// Optional: tracking (macOS 10.12) and OpenType features by tag
 	// (macOS 10.13).
@@ -296,6 +301,13 @@ func loadCoreText() error {
 	ct.featureTag = optional(text, "kCTFontOpenTypeFeatureTag")
 	ct.featureValue = optional(text, "kCTFontOpenTypeFeatureValue")
 	initDelegates(text, optional)
+	if sym, err := purego.Dlsym(text, "CTTypesetterCreateWithAttributedStringAndOptions"); err == nil && sym != 0 {
+		key, yes := optional(text, "kCTTypesetterOptionAllowUnboundedLayout"), optional(cf, "kCFBooleanTrue")
+		if key != 0 && yes != 0 {
+			ct.typesetterCreateWith = sym
+			ct.unbounded = cfDictionary([]uintptr{key}, []uintptr{yes})
+		}
+	}
 	// Optional: adding fonts from memory (macOS 10.13), sRGB by name.
 	if sym, err := purego.Dlsym(text, "CTFontManagerCreateFontDescriptorsFromData"); err == nil && sym != 0 {
 		purego.RegisterFunc(&ct.descriptorsFromData, sym)
@@ -1007,23 +1019,20 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 	e.u16, e.index = appendUTF16(e.u16[:0], e.index[:0], text)
 	u16, index := e.u16, e.index
 	n := len(u16)
-	if width > 0 && n > windowThreshold && windowEligible(text, rtl) {
+	keep := keeps(text, n, style, spans, width, rtl, wholeWords, lang)
+	// A long text that is not kept is wrapped anew at each width: over
+	// windows, rather than one typesetter whose line breaks cost more the
+	// further they are.
+	if width > 0 && !keep && n > windowThreshold && windowEligible(text, rtl) {
 		if lines, ok := e.typesetWindowed(font, u16, index, text, style, spans, width, wholeWords, lang); ok {
 			return lines
 		}
 	}
-	// A typesetter over the whole paragraph, kept for another width or
-	// shaped once, finds its own breaks below.
 	if len(spans) > 0 {
 		// After the typesetter and its lines are released, deferred
 		// below.
 		defer e.delegates.done()
 	}
-	// A typesetter holds the shaping of its text, whatever the width, so a
-	// text wrapped again at another width needs only new line breaks.
-	// Keeping it is for text wrapping: a line that does not wrap has one
-	// layout, and the text of a list or a dashboard comes and goes.
-	keep := width > 0 && len(spans) == 0 && style.tabStop <= 0
 	var key typesetterKey
 	var kept *keptTypesetter
 	var typesetter uintptr
@@ -1052,7 +1061,7 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 			defer ct.release(typesetter)
 		}
 	}
-	if kept != nil && kept.latin && !wholeWords && !rtl && lang == "" && style.LetterSpacing == 0 && style.Features == "" {
+	if kept != nil && kept.latin && wrapsWhole(style, rtl, wholeWords, lang) {
 		if lines := e.wrapKept(kept, text, style, width); lines != nil {
 			return lines
 		}
@@ -1063,6 +1072,28 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 		breaks, keepWords = e.wordBreaks(text, style, spans, wholeWords)
 	}
 	return e.typesetLines(typesetter, 0, n, width, breaks, wholeWords, keepWords, index, style.Italic)
+}
+
+// keeps reports whether the typesetter of a text of n UTF-16 units is kept.
+// A typesetter holds the shaping of its text, whatever the width, so a text
+// wrapped again at another width needs only new line breaks. Keeping it is
+// for text wrapping: a line that does not wrap has one layout, and the text
+// of a list or a dashboard comes and goes. Past typesetterLimit, a
+// typesetter that lays a text out right takes longer to make the longer its
+// text, quadratically in Han and kana, but for plain Latin text, which
+// wrapKept wraps at each width from its one line: other texts past
+// keptLimit are not kept.
+func keeps(text []rune, n int, style Style, spans []Span, width float32, rtl, wholeWords bool, lang string) bool {
+	if width <= 0 || len(spans) > 0 || style.tabStop > 0 {
+		return false
+	}
+	return n <= keptLimit || plainLatin(text) && wrapsWhole(style, rtl, wholeWords, lang)
+}
+
+// wrapsWhole reports whether a kept text of plain Latin, in style, may be
+// wrapped from its one line (wrapKept).
+func wrapsWhole(style Style, rtl, wholeWords bool, lang string) bool {
+	return !wholeWords && !rtl && lang == "" && style.LetterSpacing == 0 && style.Features == ""
 }
 
 // wordBreaks returns where the lines of text may break, when Core Text's
@@ -1097,17 +1128,24 @@ func windowEligible(text []rune, rtl bool) bool {
 	return true
 }
 
-// windowThreshold is the length in UTF-16 units at which a paragraph
-// takes bounded typesetters, and the room each of them sees past the
-// line it starts at.
+// windowThreshold is the length in UTF-16 units past which a paragraph
+// that is not kept takes bounded typesetters, and the room each of them
+// sees past the line it starts at. Past about 4096 units, windows wrap
+// text of spans faster than one typesetter, English or Chinese.
 var windowThreshold = 4096
 
 // typesetterLimit is the longest text, in UTF-16 units, that a typesetter
 // lays out as it lays out a short one. Over a longer text Core Text, but
 // for kCTTypesetterOptionAllowUnboundedLayout, positions glyphs and
 // breaks lines otherwise: from 10241 units, in every font tried on macOS
-// 26. A window stays within it.
+// 26, as AppKit does not. A window stays within it.
 const typesetterLimit = 10240
+
+// keptLimit is the longest text, in UTF-16 units, but for plain Latin text,
+// whose typesetter is kept (keeps). 32000 units of Chinese take about 70 ms
+// to wrap first on a kept typesetter and 18 ms at each width after, 34 ms
+// each over windows; 50000 take 157 ms first.
+var keptLimit = 1 << 15
 
 // typesetWindowed breaks a long left-to-right paragraph over bounded
 // typesetters, or reports that a line is too long for them. A window
@@ -1317,6 +1355,11 @@ func (e *coreText) newTypesetter(font uintptr, u16 []uint16, text []rune, style 
 		styled := e.styleSpans(attributed, style, spans, text)
 		defer ct.release(styled)
 		attributed = styled
+	}
+	if len(u16) > typesetterLimit && ct.unbounded != 0 {
+		// A long text laid out as a short one, as AppKit lays it out.
+		r, _, _ := purego.SyscallN(ct.typesetterCreateWith, attributed, ct.unbounded)
+		return r
 	}
 	return ct.typesetterCreate(attributed)
 }
