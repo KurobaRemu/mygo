@@ -675,6 +675,40 @@ func TestCoreTextKeptRewrap(t *testing.T) {
 	}
 }
 
+// TestCoreTextKeptRTL checks that a right-to-left text past keptLimit,
+// which windows do not take, keeps its typesetter across widths, and that
+// each width lays it out as a typesetter made for it alone.
+func TestCoreTextKeptRTL(t *testing.T) {
+	old := keptLimit
+	keptLimit = 4096
+	defer func() { keptLimit = old }()
+	arabic := "النص العربي الطويل يكتب من اليمين إلى اليسار، ويحتوي على أرقام 123 وكلمات English أحيانا. "
+	r := []rune(strings.Repeat(arabic, 14000/len([]rune(arabic))+1))[:14000]
+	s := newSystem()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.engine().(*coreText)
+	for _, width := range []float32{400, 300, 517, 400} {
+		e.resetScratch()
+		got := cloneLines(e.shape(r, Style{Size: 14}, nil, width, true, false))
+		if len(e.typesetters) != 1 {
+			t.Fatalf("%d typesetters kept, want 1", len(e.typesetters))
+		}
+		fresh := newSystem()
+		fresh.mu.Lock()
+		want := cloneLines(fresh.engine().(*coreText).shape(r, Style{Size: 14}, nil, width, true, false))
+		fresh.mu.Unlock()
+		if len(got) != len(want) {
+			t.Fatalf("at %v, %d lines kept, %d fresh", width, len(got), len(want))
+		}
+		for i := range got {
+			if !sameLine(got[i], want[i]) {
+				t.Fatalf("at %v, line %d [%d,%d) kept differs from [%d,%d) fresh", width, i, got[i].start, got[i].end, want[i].start, want[i].end)
+			}
+		}
+	}
+}
+
 // sameLine reports whether two lines, of engines of their own, have the
 // same runes and glyphs, placed within wrapTolerance as wrapKept places
 // them.

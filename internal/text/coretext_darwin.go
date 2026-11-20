@@ -1082,12 +1082,12 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 // typesetter that lays a text out right takes longer to make the longer its
 // text, quadratically in Han and kana, but for plain Latin text, which
 // wrapKept wraps at each width from its one line: other texts past
-// keptLimit are not kept.
+// keptLimit take windows instead, but for those windows do not take.
 func keeps(text []rune, n int, style Style, spans []Span, width float32, rtl, wholeWords bool, lang string) bool {
 	if width <= 0 || len(spans) > 0 || style.tabStop > 0 {
 		return false
 	}
-	return n <= keptLimit || plainLatin(text) && wrapsWhole(style, rtl, wholeWords, lang)
+	return n <= keptLimit || plainLatin(text) && wrapsWhole(style, rtl, wholeWords, lang) || !windowEligible(text, rtl)
 }
 
 // wrapsWhole reports whether a kept text of plain Latin, in style, may be
