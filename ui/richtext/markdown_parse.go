@@ -2,7 +2,7 @@ package richtext
 
 import (
 	"strings"
-	"unsafe"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/internal/rope"
 	"github.com/egoist/mygo/ui/markdown/parser"
@@ -17,10 +17,16 @@ import (
 // by tabs, the header's bold. Math, which the editor does not show, stays
 // as written: \[ is an escaped bracket, as everywhere but in math.
 func ParseMarkdown(s string) Text {
+	// Invalid UTF-8 becomes U+FFFD: the halves of a broken sequence,
+	// apart in the source, would meet in the text as one rune, which the
+	// runs count as two.
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "\uFFFD")
+	}
 	d := parser.New(parser.GFM | parser.ExtFootnotes)
 	d.Set(s)
 	m := mdReader{d: d}
-	m.b.buf = make([]byte, 0, len(s))
+	m.b.buf.Grow(len(s))
 	m.blocks(0, ParagraphStyle{}, -1)
 	return m.b.text()
 }
@@ -39,7 +45,7 @@ type mdReader struct {
 // fixed-size slabs of attrRuns, avoiding intermediate []Paragraph and
 // []Run copies.
 type textBuilder struct {
-	buf   []byte
+	buf   strings.Builder
 	paras []richPara
 	slab  []attrRun
 	from  int // where the open paragraph's runs start in slab
@@ -63,7 +69,7 @@ func (b *textBuilder) start(st ParagraphStyle) {
 		b.end()
 	}
 	if len(b.paras) > 0 {
-		b.buf = append(b.buf, '\n')
+		b.buf.WriteByte('\n')
 	}
 	b.open, b.style, b.n, b.last = true, st, 0, Attributes{}
 	b.from = len(b.slab)
@@ -112,7 +118,7 @@ func (b *textBuilder) addLine(s string, a Attributes) {
 	if s == "" {
 		return
 	}
-	b.buf = append(b.buf, s...)
+	b.buf.WriteString(s)
 	b.last = a
 	if a.Attachment == nil {
 		n := rope.CountRunes(s)
@@ -166,9 +172,7 @@ func (b *textBuilder) text() Text {
 	if len(b.paras) == 0 {
 		return Text{}
 	}
-	// rope.Build clones every leaf, so buf is read once and not retained.
-	s := unsafe.String(unsafe.SliceData(b.buf), len(b.buf))
-	return Text{text: rope.Build(s), paras: seqBuild(b.paras)}
+	return Text{text: rope.Build(b.buf.String()), paras: seqBuild(b.paras)}
 }
 
 // blocks adds the children of block i in style st; depth is the level of
@@ -248,10 +252,15 @@ func (m *mdReader) block(i int, st ParagraphStyle, depth int) {
 			}
 		}
 	case parser.FootnoteDefinition:
+		// The label goes before the first paragraph, after the labels of
+		// the definitions it is in.
 		prev := m.b.label
-		m.b.label = "[" + b.Label() + "] "
+		m.b.label = prev + "[" + b.Label() + "] "
 		m.blocks(i, st, depth)
-		m.b.label = prev
+		if m.b.label != "" {
+			// No paragraph took it: the next one takes the outer labels.
+			m.b.label = prev
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
@@ -303,6 +304,15 @@ func TestParseMarkdownEdgeCases(t *testing.T) {
 				para(ParagraphStyle{CodeBlock: true}, Run{Text: "[b] "}),
 			),
 		},
+		{
+			name: "nested_footnote_definitions",
+			src:  "x[^a]\n\n[^a]:[^b]: inner\n\n[^c]: [^d]:\n\n    after",
+			want: TextOf(
+				para(ParagraphStyle{}, Run{Text: "x[a]"}),
+				para(ParagraphStyle{}, Run{Text: "[a] [b] inner"}),
+				para(ParagraphStyle{}, Run{Text: "[c] after"}),
+			),
+		},
 	}
 
 	for _, tc := range cases {
@@ -352,4 +362,17 @@ func TestParseMarkdownSlabInvariants(t *testing.T) {
 		want := TextOf(Paragraph{Runs: wantRuns})
 		assertExactText(t, "single_para_exceeding_slab", got, want)
 	})
+}
+
+// TestParseMarkdownInvalidUTF8 checks that the halves of a broken UTF-8
+// sequence, apart in the source, don't meet in the text as one rune that
+// the runs count as two.
+func TestParseMarkdownInvalidUTF8(t *testing.T) {
+	for _, s := range []string{" ___\xcf_\x8c_", "**\xcf**\x8c", "a\xcf*\x8c*", "\xff`\xfe`"} {
+		got := ParseMarkdown(s)
+		checkInvariants(t, got)
+		if !utf8.ValidString(got.String()) {
+			t.Fatalf("%q: text %q is not valid UTF-8", s, got.String())
+		}
+	}
 }
